@@ -11,6 +11,7 @@ import {
   toggleShellSnippet,
   updateShellSnippet,
 } from "./shellTrack.js";
+import { ConfigFileError } from "./configFile.js";
 
 describe("shellTrack", () => {
   it("CRUD snippets", () => {
@@ -124,6 +125,12 @@ describe("shellTrack", () => {
   it("parseShellConfig & formatShellConfig", () => {
     const raw = "";
     expect(parseShellConfig(raw)).toEqual({ version: 1, snippets: [] });
+
+    // 坏文件必须抛错:静默返回空的话,保存时会连带重新生成 shell.sh,
+    // 等于把用户的全局环境变量和 alias 一起清空
+    expect(() => parseShellConfig("{ oops")).toThrow(ConfigFileError);
+    expect(() => parseShellConfig(JSON.stringify({ version: 99, snippets: [] }))).toThrow(ConfigFileError);
+    expect(parseShellConfig(JSON.stringify({ snippets: [] }))).toEqual({ version: 1, snippets: [] });
 
     const c = createEmptyShellConfig();
     const formatted = formatShellConfig(c);

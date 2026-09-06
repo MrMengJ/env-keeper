@@ -10,11 +10,30 @@ import {
   toggleProjectSecret,
   touchProject,
 } from "./registry.js";
+import { ConfigFileError } from "./configFile.js";
 
 describe("registry", () => {
-  it("parseRegistry & formatRegistry: handles valid and malformed input safely", () => {
+  it("parseRegistry & formatRegistry: 空内容当新装,坏内容必须抛错", () => {
+    // 空文件 = 全新安装,不是异常
     expect(parseRegistry("")).toEqual({ version: 1, projects: [] });
-    expect(parseRegistry("{ invalid json")).toEqual({ version: 1, projects: [] });
+
+    // 坏文件绝不能静默当成空:那样用户看到空列表 → 重新添加 → 保存,
+    // 就把还留着原始数据的坏文件覆盖没了
+    expect(() => parseRegistry("{ invalid json")).toThrow(ConfigFileError);
+    expect(() => parseRegistry("[1,2,3]")).toThrow(ConfigFileError);
+
+    // 来自更新版本的扩展(用户降级)也要拦住,否则不认识的新字段会被写没
+    try {
+      parseRegistry(JSON.stringify({ version: 99, projects: [] }));
+      throw new Error("应该抛错");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigFileError);
+      expect((e as ConfigFileError).reason).toBe("tooNew");
+      expect((e as ConfigFileError).fileVersion).toBe(99);
+    }
+
+    // 缺 version 字段的早期文件按 v1 放行,不算损坏
+    expect(parseRegistry(JSON.stringify({ projects: [] }))).toEqual({ version: 1, projects: [] });
 
     const initial = createEmptyRegistry();
     const formatted = formatRegistry(initial);

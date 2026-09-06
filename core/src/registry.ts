@@ -1,3 +1,5 @@
+import { parseVersionedConfig } from "./configFile.js";
+
 export interface ProjectMeta {
   id: string;
   name: string;
@@ -20,20 +22,34 @@ export function createEmptyRegistry(): RegistryData {
   };
 }
 
+/** 当前扩展写出的注册表版本。改结构时 +1,并在 migrateRegistry 里补一段迁移 */
+export const CURRENT_REGISTRY_VERSION = 1;
+
+/**
+ * 解析注册表。空内容 → 空注册表(全新安装);损坏或版本过新 → 抛 ConfigFileError,
+ * 由调用方隔离原文件并告知用户,绝不静默当成"空"(否则下一次保存就把原数据覆盖没了)。
+ */
 export function parseRegistry(jsonStr: string): RegistryData {
-  if (!jsonStr || jsonStr.trim() === "") {
-    return createEmptyRegistry();
-  }
-  try {
-    const data = JSON.parse(jsonStr);
-    if (!data || typeof data !== "object") return createEmptyRegistry();
-    return {
-      version: 1,
-      projects: Array.isArray(data.projects) ? data.projects : [],
-    };
-  } catch {
-    return createEmptyRegistry();
-  }
+  const parsed = parseVersionedConfig(jsonStr, CURRENT_REGISTRY_VERSION);
+  if (!parsed) return createEmptyRegistry();
+
+  return migrateRegistry(
+    {
+      version: CURRENT_REGISTRY_VERSION,
+      projects: Array.isArray(parsed.data.projects) ? (parsed.data.projects as ProjectMeta[]) : [],
+    },
+    parsed.version
+  );
+}
+
+/**
+ * 老版本数据升级到当前版本。目前只有 v1,没有实际迁移,
+ * 留着这个接缝是为了以后加字段时有地方落,而不是等到那时候再回来补版本判断。
+ */
+export function migrateRegistry(registry: RegistryData, fromVersion: number): RegistryData {
+  if (fromVersion === CURRENT_REGISTRY_VERSION) return registry;
+  // 未来的迁移按 fromVersion 逐级往上补
+  return registry;
 }
 
 export function formatRegistry(registry: RegistryData): string {

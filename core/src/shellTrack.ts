@@ -1,3 +1,5 @@
+import { parseVersionedConfig } from "./configFile.js";
+
 export type ShellSnippetType = "export" | "alias" | "snippet";
 
 export interface ShellSnippet {
@@ -21,18 +23,31 @@ export function createEmptyShellConfig(): ShellConfig {
   };
 }
 
+/** 当前扩展写出的 Shell 配置版本。改结构时 +1,并在 migrateShellConfig 里补一段迁移 */
+export const CURRENT_SHELL_CONFIG_VERSION = 1;
+
+/**
+ * 解析 Shell 配置。空内容 → 空配置;损坏或版本过新 → 抛 ConfigFileError。
+ * 这里静默返回空的危害比注册表更大:保存时会连带重新生成 shell.sh,
+ * 等于把用户的全局环境变量和 alias 一起清空。
+ */
 export function parseShellConfig(jsonStr: string): ShellConfig {
-  if (!jsonStr || jsonStr.trim() === "") return createEmptyShellConfig();
-  try {
-    const data = JSON.parse(jsonStr);
-    if (!data || typeof data !== "object") return createEmptyShellConfig();
-    return {
-      version: 1,
-      snippets: Array.isArray(data.snippets) ? data.snippets : [],
-    };
-  } catch {
-    return createEmptyShellConfig();
-  }
+  const parsed = parseVersionedConfig(jsonStr, CURRENT_SHELL_CONFIG_VERSION);
+  if (!parsed) return createEmptyShellConfig();
+
+  return migrateShellConfig(
+    {
+      version: CURRENT_SHELL_CONFIG_VERSION,
+      snippets: Array.isArray(parsed.data.snippets) ? (parsed.data.snippets as ShellSnippet[]) : [],
+    },
+    parsed.version
+  );
+}
+
+/** 老版本数据升级到当前版本。目前只有 v1,留接缝同 migrateRegistry */
+export function migrateShellConfig(config: ShellConfig, fromVersion: number): ShellConfig {
+  if (fromVersion === CURRENT_SHELL_CONFIG_VERSION) return config;
+  return config;
 }
 
 export function formatShellConfig(config: ShellConfig): string {

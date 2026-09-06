@@ -1,3 +1,4 @@
+export * from "./configFile.js";
 export * from "./parseEnv.js";
 export * from "./envOps.js";
 export * from "./registry.js";
