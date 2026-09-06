@@ -166,8 +166,11 @@ export function isSecretKey(key: string, customSecrets?: string[]): boolean {
 /**
  * 对敏感值打码
  */
+/** 打码后统一显示成这一串,长度固定,不泄露原值长度 */
+export const MASKED_VALUE = "••••••••";
+
 export function maskSecret(_value: string): string {
-  return "••••••••";
+  return MASKED_VALUE;
 }
 
 /**

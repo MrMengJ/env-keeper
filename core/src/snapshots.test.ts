@@ -44,4 +44,11 @@ describe("snapshots", () => {
     expect(checkSnapshotSoftLimit(500, 500).exceeded).toBe(true);
     expect(checkSnapshotSoftLimit(501, 500).exceeded).toBe(true);
   });
+
+  it("parseSnapshotFilename 认得同秒撞名时补的序号", () => {
+    expect(parseSnapshotFilename("2026-09-06-100633-2..env.development")).toEqual({
+      timestampStr: "2026-09-06-100633",
+      envFilename: ".env.development",
+    });
+  });
 });

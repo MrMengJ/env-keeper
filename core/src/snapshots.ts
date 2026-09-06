@@ -29,7 +29,8 @@ export function parseSnapshotFilename(filename: string): {
   timestampStr: string;
   envFilename: string;
 } | null {
-  const match = /^(\d{4}-\d{2}-\d{2}-\d{6})\.(.+)$/.exec(filename);
+  // 时间戳只精确到秒,同一秒内连续保存会撞名,所以允许中间插一个 -2 / -3 的序号
+  const match = /^(\d{4}-\d{2}-\d{2}-\d{6})(?:-\d+)?\.(.+)$/.exec(filename);
   if (!match) return null;
   const timestampStr = match[1];
   const rawEnvName = match[2];

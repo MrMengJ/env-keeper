@@ -1,3 +1,4 @@
+import { isSecretKey, MASKED_VALUE } from "./envOps.js";
 import { parseVersionedConfig } from "./configFile.js";
 
 export type ShellSnippetType = "export" | "alias" | "snippet";
@@ -9,6 +10,12 @@ export interface ShellSnippet {
   content: string;
   enabled: boolean;
   description?: string;
+  /**
+   * 用户手动标记"这段里有敏感信息"。片段内容是自由文本,
+   * 按关键词自动识别总有漏网的写法(比如密钥拼在一长串命令里),
+   * 勾了就整段打码,作为自动识别之外的兜底。
+   */
+  containsSecret?: boolean;
 }
 
 export interface ShellConfig {
@@ -149,6 +156,101 @@ export function moveShellSnippet(config: ShellConfig, id: string, direction: "up
   snippets[index] = displaced;
   snippets[targetIndex] = moved;
   return { ...config, snippets };
+}
+
+export type ShellSnippetDiffType = "added" | "removed" | "changed" | "unchanged";
+
+export interface ShellSnippetDiffEntry {
+  type: ShellSnippetDiffType;
+  /** 片段 id;按 id 比对而不是按名字,这样"只改了名字"能识别成 changed 而不是一删一增 */
+  id: string;
+  /** 展示用的名字:removed 用旧名,其余用新名 */
+  name: string;
+  /** 名字被改过时,这里是旧名 */
+  previousName?: string;
+  before?: ShellSnippet;
+  after?: ShellSnippet;
+}
+
+/** 两个片段在用户看得见的层面是否等价 */
+function sameSnippet(a: ShellSnippet, b: ShellSnippet): boolean {
+  return (
+    a.name === b.name &&
+    a.type === b.type &&
+    a.content === b.content &&
+    a.enabled === b.enabled &&
+    (a.description ?? "") === (b.description ?? "")
+  );
+}
+
+/**
+ * 比较两份 Shell 片段列表(如"某历史快照"与"当前配置")。
+ * base = 旧版本,target = 新版本;返回按 added/removed/changed/unchanged 排序,同类型内按名字排序。
+ */
+export function diffShellSnippets(base: ShellSnippet[], target: ShellSnippet[]): ShellSnippetDiffEntry[] {
+  const baseMap = new Map(base.map((s) => [s.id, s]));
+  const targetMap = new Map(target.map((s) => [s.id, s]));
+  const ids = new Set<string>([...baseMap.keys(), ...targetMap.keys()]);
+  const result: ShellSnippetDiffEntry[] = [];
+
+  for (const id of ids) {
+    const before = baseMap.get(id);
+    const after = targetMap.get(id);
+
+    if (before && !after) {
+      result.push({ type: "removed", id, name: before.name, before });
+    } else if (!before && after) {
+      result.push({ type: "added", id, name: after.name, after });
+    } else if (before && after) {
+      const changed = !sameSnippet(before, after);
+      result.push({
+        type: changed ? "changed" : "unchanged",
+        id,
+        name: after.name,
+        previousName: before.name !== after.name ? before.name : undefined,
+        before,
+        after,
+      });
+    }
+  }
+
+  const order: Record<ShellSnippetDiffType, number> = { added: 0, removed: 1, changed: 2, unchanged: 3 };
+  return result.sort((a, b) => order[a.type] - order[b.type] || a.name.localeCompare(b.name));
+}
+
+/** 一行里"KEY=值"形态的赋值,可选带 export 前缀 */
+const SHELL_ASSIGNMENT_RE = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/;
+
+/**
+ * 把片段内容里的敏感值打码,用于界面展示。
+ *
+ * 片段是自由文本的多行 shell,没有 .env 那样的结构,所以只能逐行找
+ * `KEY=值` / `export KEY=值` 这种形态,拿 KEY 交给 isSecretKey 判断。
+ * 认不出的行原样保留——宁可漏打码也不要把用户看不懂的东西显示出来。
+ *
+ * 注意这只影响"显示":生成的 shell.sh 里必须是明文,否则 shell 读不到。
+ * 它防的是别人瞄到你屏幕,不是防文件被读走。
+ */
+export function maskShellContent(
+  content: string,
+  options: { customSecrets?: string[]; maskAll?: boolean } = {}
+): string {
+  const { customSecrets, maskAll = false } = options;
+
+  return content
+    .split("\n")
+    .map((line) => {
+      const match = SHELL_ASSIGNMENT_RE.exec(line);
+      if (!match) {
+        // 整段标记为敏感时,连认不出的行也一并遮住
+        return maskAll && line.trim() !== "" && !line.trim().startsWith("#") ? MASKED_VALUE : line;
+      }
+      const [, prefix, key, eq, value] = match;
+      if (value === undefined || value === "") return line;
+      if (!maskAll && !isSecretKey(key ?? "", customSecrets)) return line;
+      return `${prefix}${key}${eq}${MASKED_VALUE}`;
+    })
+    .join("\n");
 }
 
 export function generateShellScript(snippets: ShellSnippet[]): string {

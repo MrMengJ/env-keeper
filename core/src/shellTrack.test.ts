@@ -3,13 +3,16 @@ import {
   addShellSnippet,
   createEmptyShellConfig,
   formatShellConfig,
+  diffShellSnippets,
   generateShellScript,
   moveShellSnippet,
+  maskShellContent,
   matchesDeclaredType,
   parseShellConfig,
   removeShellSnippet,
   toggleShellSnippet,
   updateShellSnippet,
+  type ShellSnippet,
 } from "./shellTrack.js";
 import { ConfigFileError } from "./configFile.js";
 
@@ -135,5 +138,76 @@ describe("shellTrack", () => {
     const c = createEmptyShellConfig();
     const formatted = formatShellConfig(c);
     expect(parseShellConfig(formatted)).toEqual(c);
+  });
+
+  it("diffShellSnippets 按 id 比对", () => {
+    const mk = (id: string, name: string, content: string, enabled = true): ShellSnippet => ({
+      id,
+      name,
+      type: "export",
+      content,
+      enabled,
+    });
+    const before = [mk("a", "A", "export A=1"), mk("b", "B", "export B=1"), mk("c", "C", "export C=1")];
+    const after = [
+      mk("a", "A", "export A=1"), // 没变
+      mk("b", "B2", "export B=1"), // 只改了名字
+      mk("d", "D", "export D=1"), // 新增;c 被删了
+    ];
+
+    const diff = diffShellSnippets(before, after);
+    const byId = Object.fromEntries(diff.map((d) => [d.id, d]));
+
+    expect(byId.a?.type).toBe("unchanged");
+    expect(byId.d?.type).toBe("added");
+    expect(byId.c?.type).toBe("removed");
+    expect(byId.c?.name).toBe("C"); // 删掉的用旧名展示
+
+    // 只改名字要识别成 changed,而不是一删一增
+    expect(byId.b?.type).toBe("changed");
+    expect(byId.b?.previousName).toBe("B");
+    expect(byId.b?.name).toBe("B2");
+
+    // 只切换启用状态也算改动
+    const toggled = diffShellSnippets([mk("a", "A", "export A=1", true)], [mk("a", "A", "export A=1", false)]);
+    expect(toggled[0]?.type).toBe("changed");
+
+    // added 排在 removed 前面,removed 排在 changed 前面
+    expect(diff.map((d) => d.type)).toEqual(["added", "removed", "changed", "unchanged"]);
+  });
+
+  it("maskShellContent 只遮敏感行,认不出的原样保留", () => {
+    const src = [
+      "# 我的配置",
+      'export JAVA_HOME="/opt/jdk"',
+      'export API_KEY="sk-real-secret"',
+      "DB_PASSWORD=hunter2",
+      "alias ll='ls -la'",
+      "some_random_command --flag",
+    ].join("\n");
+
+    const masked = maskShellContent(src);
+    // 命中关键词的值被遮住
+    expect(masked).toContain("export API_KEY=••••••••");
+    expect(masked).toContain("DB_PASSWORD=••••••••");
+    expect(masked).not.toContain("sk-real-secret");
+    expect(masked).not.toContain("hunter2");
+    // 不敏感的、注释、认不出的行原样保留
+    expect(masked).toContain('export JAVA_HOME="/opt/jdk"');
+    expect(masked).toContain("# 我的配置");
+    expect(masked).toContain("alias ll='ls -la'");
+    expect(masked).toContain("some_random_command --flag");
+  });
+
+  it("maskShellContent 支持自定义敏感词与整段遮蔽", () => {
+    const src = "export MY_THING=abc\nexport OTHER=def";
+    expect(maskShellContent(src, { customSecrets: ["MY_THING"] })).toContain("export MY_THING=••••••••");
+    expect(maskShellContent(src, { customSecrets: ["MY_THING"] })).toContain("export OTHER=def");
+
+    // 整段标记敏感时,连认不出的行也遮住,但注释和空行保留(否则完全看不出结构)
+    const all = maskShellContent("# 说明\n\nsome_command --token abc\nexport A=1", { maskAll: true });
+    expect(all).toContain("# 说明");
+    expect(all).not.toContain("some_command");
+    expect(all).toContain("export A=••••••••");
   });
 });
