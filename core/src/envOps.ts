@@ -6,6 +6,8 @@ const DEFAULT_SECRET_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/i;
 export interface EnvVariableOptions {
   quote?: "'" | '"' | null;
   disabled?: boolean;
+  /** 行内注释正文(不含 `#`)。传空串表示去掉注释;不传表示沿用原有的 */
+  comment?: string;
 }
 
 /**
@@ -18,12 +20,16 @@ export function formatKVRaw(
     quote?: "'" | '"' | null;
     disabled?: boolean;
     end?: "\n" | "\r\n" | "";
+    comment?: string;
   } = {}
 ): string {
-  const { quote = null, disabled = false, end = "\n" } = options;
+  const { quote = null, disabled = false, end = "\n", comment } = options;
   const quotedValue = quote ? `${quote}${value}${quote}` : value;
   const prefix = disabled ? "# " : "";
-  return `${prefix}${key}=${quotedValue}${end}`;
+  // 注释统一重排成 ` # 正文`。只有被编辑过的行才会走到这里重建 raw,
+  // 没动过的行始终原样保留,所以不会全文重排空格
+  const trailing = comment && comment.trim() !== "" ? ` # ${comment.trim()}` : "";
+  return `${prefix}${key}=${quotedValue}${trailing}${end}`;
 }
 
 /**
@@ -40,6 +46,7 @@ export function updateEnvVariable(
 
     const quote = options?.quote !== undefined ? options.quote : line.quote;
     const disabled = options?.disabled !== undefined ? options.disabled : line.disabled;
+    const comment = options?.comment !== undefined ? options.comment : line.comment;
     const end = line.end;
 
     return {
@@ -48,8 +55,9 @@ export function updateEnvVariable(
       value: newValue,
       quote,
       disabled,
+      comment: comment === "" ? undefined : comment,
       end,
-      raw: formatKVRaw(line.key, newValue, { quote, disabled, end }),
+      raw: formatKVRaw(line.key, newValue, { quote, disabled, end, comment }),
     };
   });
 }
@@ -80,6 +88,7 @@ export function addEnvVariable(
 
   const quote = options?.quote ?? null;
   const disabled = options?.disabled ?? false;
+  const comment = options?.comment?.trim() ? options.comment : undefined;
   const end: "\n" = "\n";
 
   result.push({
@@ -88,8 +97,9 @@ export function addEnvVariable(
     value,
     quote,
     disabled,
+    comment,
     end,
-    raw: formatKVRaw(key, value, { quote, disabled, end }),
+    raw: formatKVRaw(key, value, { quote, disabled, end, comment }),
   });
 
   return result;
@@ -117,6 +127,7 @@ export function toggleEnvVariable(lines: EnvLine[], key: string): EnvLine[] {
         quote: line.quote,
         disabled: newDisabled,
         end: line.end,
+        comment: line.comment,
       }),
     };
   });
@@ -133,7 +144,10 @@ export function generateExampleEnv(lines: EnvLine[]): string {
         return line.raw;
       }
       const prefix = line.disabled ? "# " : "";
-      return `${prefix}${line.key}=${line.end}`;
+      // 行内注释要留下:.env.example 是给团队看的模板,
+      // 逐个变量的说明恰恰是最该保留的部分(值才是要清空的)
+      const trailing = line.comment ? ` # ${line.comment}` : "";
+      return `${prefix}${line.key}=${trailing}${line.end}`;
     })
     .join("");
 }

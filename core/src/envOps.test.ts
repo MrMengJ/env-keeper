@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type EnvLine, parseEnv } from "./parseEnv.js";
+import { type EnvLine, parseEnv, serializeEnv } from "./parseEnv.js";
 import {
   addEnvVariable,
   computeFingerprint,
@@ -117,5 +117,45 @@ describe("envOps", () => {
     expect(isValidEnvFilename(".envrc")).toBe(false);
     expect(isValidEnvFilename(".env.../etc")).toBe(false);
     expect(isValidEnvFilename(".env ")).toBe(true); // 前后空白会被 trim
+  });
+
+  it("行内注释:编辑值时注释保持不变", () => {
+    const lines = parseEnv("API_URL=http://old.com # 生产环境\n");
+    const updated = updateEnvVariable(lines, "API_URL", "http://new.com");
+    expect(serializeEnv(updated)).toBe("API_URL=http://new.com # 生产环境\n");
+  });
+
+  it("行内注释:可以改写,也可以传空串删掉", () => {
+    const lines = parseEnv("API_URL=http://a.com # 旧说明\n");
+    expect(serializeEnv(updateEnvVariable(lines, "API_URL", "http://a.com", { comment: "新说明" }))).toBe(
+      "API_URL=http://a.com # 新说明\n"
+    );
+    expect(serializeEnv(updateEnvVariable(lines, "API_URL", "http://a.com", { comment: "" }))).toBe(
+      "API_URL=http://a.com\n"
+    );
+  });
+
+  it("行内注释:加引号不会把注释吞进值里", () => {
+    const lines = parseEnv("API_URL=http://a.com # 生产环境\n");
+    const quoted = updateEnvVariable(lines, "API_URL", "http://a.com", { quote: '"' });
+    // 注释留在引号外面,dotenv 读到的值仍然是干净的
+    expect(serializeEnv(quoted)).toBe('API_URL="http://a.com" # 生产环境\n');
+  });
+
+  it("行内注释:启用/禁用切换不丢注释", () => {
+    const lines = parseEnv("PORT=3000 # 服务端口\n");
+    const off = toggleEnvVariable(lines, "PORT");
+    expect(serializeEnv(off)).toBe("# PORT=3000 # 服务端口\n");
+    expect(serializeEnv(toggleEnvVariable(off, "PORT"))).toBe("PORT=3000 # 服务端口\n");
+  });
+
+  it("行内注释:新增变量可以带注释", () => {
+    const added = addEnvVariable(parseEnv(""), "NEW_KEY", "v", { comment: "说明" });
+    expect(serializeEnv(added)).toBe("NEW_KEY=v # 说明\n");
+  });
+
+  it("生成 .env.example 时清空值但保留行内注释", () => {
+    const lines = parseEnv("# 数据库\nDB_URL=postgres://real/secret # 找运维要\nPORT=3000\n");
+    expect(generateExampleEnv(lines)).toBe("# 数据库\nDB_URL= # 找运维要\nPORT=\n");
   });
 });

@@ -7,7 +7,10 @@
  * 第一版范围(刻意克制):
  *  - 分类行:空行 / 注释 / KV / 被注释的 KV(# 开头且去掉注释符后是合法 KV)
  *  - KV 值支持单双引号包裹,解析时去掉引号
- *  - 不做行内注释解析(`KEY=value # note` 的 value 会保留整段)——留给 v2
+ *  - 行内注释(`KEY=value # note`)按 dotenv v16 的规则切出来放进 comment 字段:
+ *    值被引号包住时,引号内的 `#` 属于值;没有引号时,遇到第一个 `#` 就截断。
+ *    刻意跟 dotenv 保持一致——值最终是被 Vite/Next 这类工具经 dotenv 读走的,
+ *    解析规则不一致会导致"界面显示的值 != 程序拿到的值",比不解析更危险。
  */
 
 export type EnvLine =
@@ -19,8 +22,9 @@ export type EnvLine =
       end: "\n" | "\r\n" | ""; // 该行是否带换行(便于写回时重建文件)
       disabled: boolean; // true 表示被注释掉的 KV,如 `# KEY=value`
       key: string;
-      value: string; // 已去除引号的值
+      value: string; // 已去除引号与行内注释的值
       quote: "'" | '"' | null; // 值原本是否被引号包裹
+      comment?: string; // 行内注释的正文(不含 `#` 与两侧空白);没有则为 undefined
     };
 
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -30,14 +34,44 @@ function stripCommentMarker(line: string): string {
   return line.replace(/^\s*# ?/, "");
 }
 
-function parseKV(body: string): { key: string; value: string; quote: "'" | '"' | null } | null {
+/**
+ * 从 `=` 右边的原文里切出行内注释。
+ * 规则对齐 dotenv v16:值被引号包住时先跳过整段引号,之后的第一个 `#` 才算注释起点;
+ * 没有引号时,第一个 `#` 就是注释起点(不要求前面有空格)。
+ */
+function splitInlineComment(raw: string): { valuePart: string; comment?: string } {
+  const offset = raw.length - raw.trimStart().length;
+  const body = raw.slice(offset);
+  const first = body[0];
+
+  // 引号包裹时,把查找起点挪到收尾引号之后,保护引号内的 `#`
+  let searchFrom = 0;
+  if (first === '"' || first === "'") {
+    const closing = body.indexOf(first, 1);
+    if (closing >= 0) searchFrom = closing + 1;
+  }
+
+  const hash = body.indexOf("#", searchFrom);
+  if (hash < 0) return { valuePart: raw };
+
+  return {
+    valuePart: raw.slice(0, offset + hash),
+    comment: body.slice(hash + 1).trim(),
+  };
+}
+
+function parseKV(body: string): { key: string; value: string; quote: "'" | '"' | null; comment?: string } | null {
   const eq = body.indexOf("=");
   if (eq < 0) return null;
   const key = body.slice(0, eq).trim();
   if (!KEY_RE.test(key)) return null;
-  let value = body.slice(eq + 1);
 
-  // 去除整段的包裹引号(不做行内注释解析,第一版克制)
+  const { valuePart, comment } = splitInlineComment(body.slice(eq + 1));
+  // 切走注释后值尾部会残留空白(`KEY=abc  # note`),会让下面的引号识别失效,所以要去掉;
+  // 没有注释时保持原样,不改动既有行为
+  let value = comment === undefined ? valuePart : valuePart.trimEnd();
+
+  // 去除整段的包裹引号
   let quote: "'" | '"' | null = null;
   const first = value[0];
   const last = value[value.length - 1];
@@ -46,7 +80,7 @@ function parseKV(body: string): { key: string; value: string; quote: "'" | '"' |
     value = value.slice(1, -1);
   }
 
-  return { key, value, quote };
+  return { key, value, quote, comment };
 }
 
 function classify(body: string): Extract<EnvLine, { type: "kv" }> | "blank" | "comment" {
@@ -63,6 +97,7 @@ function classify(body: string): Extract<EnvLine, { type: "kv" }> | "blank" | "c
         key: kv.key,
         value: kv.value,
         quote: kv.quote,
+        comment: kv.comment,
       };
     }
     return "comment";
@@ -78,6 +113,7 @@ function classify(body: string): Extract<EnvLine, { type: "kv" }> | "blank" | "c
       key: kv.key,
       value: kv.value,
       quote: kv.quote,
+      comment: kv.comment,
     };
   }
 
