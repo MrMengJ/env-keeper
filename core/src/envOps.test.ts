@@ -103,10 +103,41 @@ describe("envOps", () => {
     const diff = diffEnvVariables(base, target);
 
     expect(diff).toEqual([
-      { key: "NEW_ONLY", type: "added", targetValue: "hi" },
-      { key: "OLD_ONLY", type: "removed", baseValue: "bye" },
-      { key: "PORT", type: "changed", baseValue: "3000", targetValue: "4000" },
-      { key: "HOST", type: "unchanged", baseValue: "localhost", targetValue: "localhost" },
+      { key: "NEW_ONLY", type: "added", targetValue: "hi", targetDisabled: false },
+      { key: "OLD_ONLY", type: "removed", baseValue: "bye", baseDisabled: false },
+      {
+        key: "PORT",
+        type: "changed",
+        baseValue: "3000",
+        targetValue: "4000",
+        baseDisabled: false,
+        targetDisabled: false,
+      },
+      {
+        key: "HOST",
+        type: "unchanged",
+        baseValue: "localhost",
+        targetValue: "localhost",
+        baseDisabled: false,
+        targetDisabled: false,
+      },
+    ]);
+  });
+
+  it("diffEnvVariables: 值没变但被注释掉,也要算成改动", () => {
+    const base = parseEnv("PORT1=3000\n");
+    const target = parseEnv("# PORT1=3000\n");
+    const diff = diffEnvVariables(base, target);
+
+    expect(diff).toEqual([
+      {
+        key: "PORT1",
+        type: "changed",
+        baseValue: "3000",
+        targetValue: "3000",
+        baseDisabled: false,
+        targetDisabled: true,
+      },
     ]);
   });
 

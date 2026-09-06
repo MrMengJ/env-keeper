@@ -262,6 +262,10 @@ export interface EnvDiffEntry {
   baseValue?: string;
   /** 新版本(如当前文件)中的值,不存在则为 undefined */
   targetValue?: string;
+  /** 旧版本中该变量是否被注释禁用;该版本里没有这个变量时为 undefined */
+  baseDisabled?: boolean;
+  /** 新版本中该变量是否被注释禁用;该版本里没有这个变量时为 undefined */
+  targetDisabled?: boolean;
 }
 
 /**
@@ -269,34 +273,39 @@ export interface EnvDiffEntry {
  * base = 旧版本, target = 新版本;returns 按 added/removed/changed/unchanged 排序、同类型内按 key 排序
  */
 export function diffEnvVariables(baseLines: EnvLine[], targetLines: EnvLine[]): EnvDiffEntry[] {
-  const baseMap = new Map<string, string>();
-  for (const l of baseLines) {
-    if (l.type === "kv") baseMap.set(l.key, l.value);
-  }
-  const targetMap = new Map<string, string>();
-  for (const l of targetLines) {
-    if (l.type === "kv") targetMap.set(l.key, l.value);
-  }
+  const collect = (lines: EnvLine[]): Map<string, { value: string; disabled: boolean }> => {
+    const map = new Map<string, { value: string; disabled: boolean }>();
+    for (const l of lines) {
+      if (l.type === "kv") map.set(l.key, { value: l.value, disabled: l.disabled });
+    }
+    return map;
+  };
+
+  const baseMap = collect(baseLines);
+  const targetMap = collect(targetLines);
 
   const keys = new Set<string>([...baseMap.keys(), ...targetMap.keys()]);
   const result: EnvDiffEntry[] = [];
 
   for (const key of keys) {
-    const inBase = baseMap.has(key);
-    const inTarget = targetMap.has(key);
+    const base = baseMap.get(key);
+    const target = targetMap.get(key);
 
-    if (inBase && !inTarget) {
-      result.push({ key, type: "removed", baseValue: baseMap.get(key) });
-    } else if (!inBase && inTarget) {
-      result.push({ key, type: "added", targetValue: targetMap.get(key) });
-    } else {
-      const baseValue = baseMap.get(key);
-      const targetValue = targetMap.get(key);
+    if (base && !target) {
+      result.push({ key, type: "removed", baseValue: base.value, baseDisabled: base.disabled });
+    } else if (!base && target) {
+      result.push({ key, type: "added", targetValue: target.value, targetDisabled: target.disabled });
+    } else if (base && target) {
+      // 值没变但启用状态变了也算改动:注释掉一个变量对运行结果的影响跟删掉它一样大,
+      // 只比值的话这种改动在差异里会完全消失
+      const same = base.value === target.value && base.disabled === target.disabled;
       result.push({
         key,
-        type: baseValue === targetValue ? "unchanged" : "changed",
-        baseValue,
-        targetValue,
+        type: same ? "unchanged" : "changed",
+        baseValue: base.value,
+        targetValue: target.value,
+        baseDisabled: base.disabled,
+        targetDisabled: target.disabled,
       });
     }
   }

@@ -4,3 +4,4 @@ export * from "./envOps.js";
 export * from "./registry.js";
 export * from "./snapshots.js";
 export * from "./shellTrack.js";
+export * from "./shellLint.js";
