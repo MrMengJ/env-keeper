@@ -5,6 +5,7 @@ import {
   computeFingerprint,
   diffEnvVariables,
   generateExampleEnv,
+  mergeExampleEnv,
   isEncryptedValue,
   isSecretKey,
   isValidEnvFilename,
@@ -157,5 +158,49 @@ describe("envOps", () => {
   it("生成 .env.example 时清空值但保留行内注释", () => {
     const lines = parseEnv("# 数据库\nDB_URL=postgres://real/secret # 找运维要\nPORT=3000\n");
     expect(generateExampleEnv(lines)).toBe("# 数据库\nDB_URL= # 找运维要\nPORT=\n");
+  });
+
+  it("mergeExampleEnv 保住模板里手写的说明", () => {
+    const example = parseEnv(
+      ["# 去 Stripe 后台 → Developers → API keys 复制", "STRIPE_KEY=", "", "# 本地随便填", "PORT=3000", ""].join("\n"),
+    );
+    const env = parseEnv(["STRIPE_KEY=sk_live_real", "PORT=8080", "NEW_ONE=abc # 新加的"].join("\n"));
+
+    const r = mergeExampleEnv(example, env);
+    // 手写注释、手填的占位值都原样留着,不会被 .env 的真实值冲掉
+    expect(r.content).toContain("# 去 Stripe 后台 → Developers → API keys 复制");
+    expect(r.content).toContain("# 本地随便填");
+    expect(r.content).toContain("PORT=3000");
+    expect(r.content).not.toContain("sk_live_real");
+    expect(r.content).not.toContain("8080");
+    // 新键追加到末尾,带上行内注释
+    expect(r.content).toContain("NEW_ONE= # 新加的");
+    expect(r.added).toEqual(["NEW_ONE"]);
+    expect(r.kept.sort()).toEqual(["PORT", "STRIPE_KEY"]);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("mergeExampleEnv 移除 .env 里已经没有的键", () => {
+    const example = parseEnv("A=\n# 关于 B 的说明\nB=\nC=\n");
+    const env = parseEnv("A=1\nC=3\n");
+    const r = mergeExampleEnv(example, env);
+    expect(r.removed).toEqual(["B"]);
+    expect(r.content).toContain("A=");
+    expect(r.content).toContain("C=");
+    expect(r.content).not.toContain("B=");
+    // 键没了,但它上面那段独立注释还在——不敢替用户判断注释是不是只属于这个键
+    expect(r.content).toContain("# 关于 B 的说明");
+  });
+
+  it("mergeExampleEnv 模板为空时等价于重新生成,且反复合并结果稳定", () => {
+    const env = parseEnv("A=1 # 说明\nB=2\n");
+    const first = mergeExampleEnv(parseEnv(""), env);
+    expect(first.content).toBe(generateExampleEnv(env));
+
+    // 幂等:再合并一次不该有任何变化
+    const second = mergeExampleEnv(parseEnv(first.content), env);
+    expect(second.content).toBe(first.content);
+    expect(second.added).toEqual([]);
+    expect(second.removed).toEqual([]);
   });
 });

@@ -152,6 +152,72 @@ export function generateExampleEnv(lines: EnvLine[]): string {
     .join("");
 }
 
+export interface ExampleMergeResult {
+  content: string;
+  /** .env 里有、模板里还没有的键(这次新加进模板) */
+  added: string[];
+  /** 模板里有、.env 里已经没有的键(这次从模板移除) */
+  removed: string[];
+  /** 两边都有,模板里那一行原样保留 */
+  kept: string[];
+}
+
+/**
+ * 把当前 .env 的键合并进已有的 .env.example,而不是整个重新生成。
+ *
+ * 为什么要合并:.env.example 是提交进 git、给团队看的模板,
+ * 上面经常有人手写补充("这个 key 去 XX 后台申请"这类说明),
+ * 而这些内容 .env 里根本没有。整体重新生成会把它们全冲掉。
+ *
+ * 合并规则:
+ * - 两边都有的键 → **模板里那一行原样保留**(手写的说明、占位值都不动)
+ * - .env 新增的键 → 追加到模板末尾,带上行内注释
+ * - .env 已删除的键 → 从模板移除
+ * - 模板里独立的注释段、空行 → 原样保留
+ *
+ * 已有键保持模板自己的顺序、新键追加到末尾,是为了让改动最小:
+ * 跟着 .env 重排会让 git diff 变得没法看。
+ */
+export function mergeExampleEnv(existingExampleLines: EnvLine[], envLines: EnvLine[]): ExampleMergeResult {
+  const envKvs = envLines.filter((l): l is Extract<EnvLine, { type: "kv" }> => l.type === "kv");
+  const envKeys = new Set(envKvs.map((l) => l.key));
+
+  const kept: string[] = [];
+  const removed: string[] = [];
+  const out: string[] = [];
+  const seenInExample = new Set<string>();
+
+  for (const line of existingExampleLines) {
+    if (line.type !== "kv") {
+      out.push(line.raw);
+      continue;
+    }
+    if (envKeys.has(line.key)) {
+      out.push(line.raw);
+      kept.push(line.key);
+      seenInExample.add(line.key);
+    } else {
+      removed.push(line.key);
+    }
+  }
+
+  const added: string[] = [];
+  for (const kv of envKvs) {
+    if (seenInExample.has(kv.key)) continue;
+    added.push(kv.key);
+    const prefix = kv.disabled ? "# " : "";
+    const trailing = kv.comment ? ` # ${kv.comment}` : "";
+    out.push(`${prefix}${kv.key}=${trailing}\n`);
+  }
+
+  // 追加新键之前,原内容最后一行如果没有换行会把两行黏在一起
+  const content = out.join("");
+  const normalized =
+    added.length > 0 && content.length > 0 && !content.endsWith("\n") ? `${content}\n` : content;
+
+  return { content: normalized, added, removed, kept };
+}
+
 /**
  * 判断是否为敏感字段
  * 匹配内置规则 (KEY, TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL)，或项目自定义敏感列表
