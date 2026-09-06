@@ -4,6 +4,7 @@ import {
   createEmptyShellConfig,
   formatShellConfig,
   generateShellScript,
+  moveShellSnippet,
   matchesDeclaredType,
   parseShellConfig,
   removeShellSnippet,
@@ -86,6 +87,38 @@ describe("shellTrack", () => {
 
     // snippet 类型完全不限制
     expect(matchesDeclaredType("snippet", "ls -la")).toBe(true);
+  });
+
+  it("moveShellSnippet 调整生成顺序", () => {
+    let cfg = createEmptyShellConfig();
+    const ids: string[] = [];
+    for (const name of ["A", "B", "C"]) {
+      const r = addShellSnippet(cfg, { name, type: "export", content: `export ${name}=1`, enabled: true });
+      cfg = r.config;
+      ids.push(r.snippet.id);
+    }
+    const names = (c: typeof cfg) => c.snippets.map((s) => s.name);
+    expect(names(cfg)).toEqual(["A", "B", "C"]);
+
+    // 下移中间一条
+    expect(names(moveShellSnippet(cfg, ids[1]!, "down"))).toEqual(["A", "C", "B"]);
+    // 上移最后一条
+    expect(names(moveShellSnippet(cfg, ids[2]!, "up"))).toEqual(["A", "C", "B"]);
+
+    // 已经在边界:原样返回,不报错也不越界
+    expect(names(moveShellSnippet(cfg, ids[0]!, "up"))).toEqual(["A", "B", "C"]);
+    expect(names(moveShellSnippet(cfg, ids[2]!, "down"))).toEqual(["A", "B", "C"]);
+
+    // id 不存在也原样返回
+    expect(names(moveShellSnippet(cfg, "nope", "up"))).toEqual(["A", "B", "C"]);
+
+    // 不改动原对象(纯函数)
+    expect(names(cfg)).toEqual(["A", "B", "C"]);
+
+    // 顺序真的会反映到生成的脚本里
+    const moved = moveShellSnippet(cfg, ids[0]!, "down");
+    const script = generateShellScript(moved.snippets);
+    expect(script.indexOf("export B=1")).toBeLessThan(script.indexOf("export A=1"));
   });
 
   it("parseShellConfig & formatShellConfig", () => {

@@ -108,6 +108,34 @@ export function matchesDeclaredType(type: ShellSnippetType, content: string): bo
 /**
  * 将启用的片段编译为 ~/.env-butler/shell.sh
  */
+/**
+ * 把片段在生成顺序里上移/下移一位。
+ *
+ * 顺序不是审美问题:generateShellScript 按数组顺序平铺输出,shell 从上往下执行,
+ * 所以后面的片段能用到前面片段定义的东西,反过来不行。典型例子:
+ *   export JAVA_HOME=/opt/jdk17
+ *   export PATH="$JAVA_HOME/bin:$PATH"   ← 必须排在上面那条之后,否则 $JAVA_HOME 展开为空
+ * 而且这种错不会报错,只会让命令莫名其妙找不到,所以要给用户调顺序的手段。
+ *
+ * 已经在最前/最后时原样返回配置,由调用方决定要不要提示。
+ */
+export function moveShellSnippet(config: ShellConfig, id: string, direction: "up" | "down"): ShellConfig {
+  const index = config.snippets.findIndex((s) => s.id === id);
+  if (index < 0) return config;
+
+  const targetIndex = direction === "up" ? index - 1 : index + 1;
+  if (targetIndex < 0 || targetIndex >= config.snippets.length) return config;
+
+  const snippets = [...config.snippets];
+  const moved = snippets[index];
+  const displaced = snippets[targetIndex];
+  if (!moved || !displaced) return config;
+
+  snippets[index] = displaced;
+  snippets[targetIndex] = moved;
+  return { ...config, snippets };
+}
+
 export function generateShellScript(snippets: ShellSnippet[]): string {
   const activeSnippets = snippets.filter((s) => s.enabled && s.content.trim() !== "");
 
