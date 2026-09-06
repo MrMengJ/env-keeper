@@ -4,6 +4,7 @@ import {
   createEmptyRegistry,
   formatRegistry,
   parseRegistry,
+  relocateProject,
   removeProject,
   setEnvrcNoticeDismissed,
   sortProjectsByRecent,
@@ -119,5 +120,29 @@ describe("registry", () => {
     };
     const sorted = sortProjectsByRecent(reg);
     expect(sorted.map((p) => p.id)).toEqual(["2", "3", "1"]);
+  });
+
+  it("项目 id 与路径无关,改路径不丢设置", () => {
+    let reg = createEmptyRegistry();
+    const added = addProject(reg, { name: "我的项目", path: "/tmp/old" });
+    reg = added.registry;
+    const id = added.project.id;
+
+    // 标一个自定义敏感字段,验证它绑在 id 上
+    reg = {
+      ...reg,
+      projects: reg.projects.map((p) => (p.id === id ? { ...p, customSecrets: ["MY_TOKEN"] } : p)),
+    };
+
+    const moved = relocateProject(reg, id, "/tmp/new");
+    const p = moved.projects.find((x) => x.id === id);
+    expect(p?.path).toBe("/tmp/new");
+    expect(p?.id).toBe(id); // id 不变
+    expect(p?.customSecrets).toEqual(["MY_TOKEN"]); // 设置跟着保留
+
+    // 同一个路径再添加一次仍然算同一个项目,不会变成两条
+    const again = addProject(moved, { name: "改个名", path: "/tmp/new" });
+    expect(again.registry.projects).toHaveLength(1);
+    expect(again.project.id).toBe(id);
   });
 });

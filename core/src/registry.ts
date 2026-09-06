@@ -56,8 +56,30 @@ export function formatRegistry(registry: RegistryData): string {
   return JSON.stringify(registry, null, 2) + "\n";
 }
 
-export function generateProjectId(projectPath: string): string {
-  return Buffer.from(projectPath.trim()).toString("base64url");
+/**
+ * 项目 id。**刻意与路径无关**。
+ *
+ * 早期是路径的 base64,后果是项目目录一改名/搬家,id 就跟着变,
+ * 而 customSecrets、dismissedEnvrcNotice 这些设置都是绑在 id 上的——
+ * 等于用户挪一下文件夹,标过的敏感字段和关掉的提示全部失效。
+ * 改成与路径无关之后,path 只是一个普通字段,改路径不丢任何设置。
+ *
+ * 老项目的 base64 id 原样保留继续用:id 是不透明的,不需要迁移。
+ */
+export function generateProjectId(): string {
+  return `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * 改掉某个项目的目录路径(目录被搬走/改名后重新指过去)。
+ * id 不变,所以敏感标记等设置全部跟着保留。
+ */
+export function relocateProject(registry: RegistryData, id: string, newPath: string): RegistryData {
+  const normPath = newPath.trim();
+  return {
+    ...registry,
+    projects: registry.projects.map((p) => (p.id === id ? { ...p, path: normPath } : p)),
+  };
 }
 
 export function addProject(
@@ -66,8 +88,8 @@ export function addProject(
   now = Date.now()
 ): { registry: RegistryData; project: ProjectMeta } {
   const normPath = item.path.trim();
-  const id = generateProjectId(normPath);
-  const existing = registry.projects.find((p) => p.path === normPath || p.id === id);
+  // 重复判定只看路径:id 已经和路径无关了
+  const existing = registry.projects.find((p) => p.path === normPath);
 
   if (existing) {
     const updated: ProjectMeta = {
@@ -85,7 +107,7 @@ export function addProject(
   }
 
   const newProject: ProjectMeta = {
-    id,
+    id: generateProjectId(),
     name: item.name.trim() || normPath.split("/").filter(Boolean).pop() || "Untitled",
     path: normPath,
     lastOpenedAt: now,

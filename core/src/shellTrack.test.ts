@@ -4,6 +4,7 @@ import {
   createEmptyShellConfig,
   formatShellConfig,
   diffShellSnippets,
+  extractShellAssignments,
   generateShellScript,
   moveShellSnippet,
   maskShellContent,
@@ -209,5 +210,21 @@ describe("shellTrack", () => {
     expect(all).toContain("# 说明");
     expect(all).not.toContain("some_command");
     expect(all).toContain("export A=••••••••");
+  });
+
+  it("extractShellAssignments 抽出片段里的变量", () => {
+    const content = [
+      "# 注释里的 IGNORED=1 不算",
+      'export JAVA_HOME="/opt/jdk"',
+      "PLAIN=abc",
+      "alias ll='ls -la'",
+      "some_cmd --token=xyz",
+      "",
+    ].join("\n");
+
+    expect(extractShellAssignments(content)).toEqual([
+      { key: "JAVA_HOME", value: "/opt/jdk" },
+      { key: "PLAIN", value: "abc" },
+    ]);
   });
 });

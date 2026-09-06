@@ -221,6 +221,35 @@ export function diffShellSnippets(base: ShellSnippet[], target: ShellSnippet[]):
 /** 一行里"KEY=值"形态的赋值,可选带 export 前缀 */
 const SHELL_ASSIGNMENT_RE = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/;
 
+export interface ShellAssignment {
+  key: string;
+  /** 已去掉包裹引号的值 */
+  value: string;
+}
+
+/**
+ * 从片段内容里抽出 `KEY=值` / `export KEY=值` 形态的赋值。
+ * 给全局搜索用:Shell 轨里存的同样是环境变量,用户搜 JAVA_HOME 却搜不到会当成 bug。
+ * 认不出的行直接跳过——这里宁可少给结果,也不要把命令行参数误当成变量。
+ */
+export function extractShellAssignments(content: string): ShellAssignment[] {
+  const result: ShellAssignment[] = [];
+  for (const line of content.split("\n")) {
+    // 被注释掉的行不算:它在 shell 里本来就不生效
+    if (line.trim().startsWith("#")) continue;
+    const match = SHELL_ASSIGNMENT_RE.exec(line);
+    if (!match) continue;
+    const key = match[2];
+    let value = match[4] ?? "";
+    const first = value[0];
+    if ((first === '"' || first === "'") && value.endsWith(first) && value.length >= 2) {
+      value = value.slice(1, -1);
+    }
+    if (key) result.push({ key, value });
+  }
+  return result;
+}
+
 /**
  * 把片段内容里的敏感值打码,用于界面展示。
  *
