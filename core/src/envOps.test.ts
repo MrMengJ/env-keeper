@@ -8,11 +8,18 @@ import {
   mergeExampleEnv,
   isEncryptedValue,
   isSecretKey,
+  isEnvFilename,
   isValidEnvFilename,
   maskSecret,
   removeEnvVariable,
+  removeEnvVariableAt,
   toggleEnvVariable,
+  toggleEnvVariableAt,
   updateEnvVariable,
+  updateEnvVariableAt,
+  countEnvKeys,
+  findEnvLineIndex,
+  formatKVRaw,
 } from "./envOps.js";
 
 describe("envOps", () => {
@@ -145,8 +152,12 @@ describe("envOps", () => {
     expect(isValidEnvFilename(".env")).toBe(true);
     expect(isValidEnvFilename(".env.development")).toBe(true);
     expect(isValidEnvFilename(".env.feature_kuangzhen")).toBe(true);
+    // Next / Vite 的标准命名是两级后缀
+    expect(isValidEnvFilename(".env.development.local")).toBe(true);
     expect(isValidEnvFilename("env")).toBe(false);
     expect(isValidEnvFilename(".envrc")).toBe(false);
+    // 模板文件不当环境文件管理
+    expect(isValidEnvFilename(".env.example")).toBe(false);
     expect(isValidEnvFilename(".env.../etc")).toBe(false);
     expect(isValidEnvFilename(".env ")).toBe(true); // 前后空白会被 trim
   });
@@ -233,5 +244,101 @@ describe("envOps", () => {
     expect(second.content).toBe(first.content);
     expect(second.added).toEqual([]);
     expect(second.removed).toEqual([]);
+  });
+
+  it("isEnvFilename: 白名单——.envrc / .env_副本 / .environment / 模板名都不算", () => {
+    expect(isEnvFilename(".env")).toBe(true);
+    expect(isEnvFilename(".env.local")).toBe(true);
+    expect(isEnvFilename(".env.production.local")).toBe(true);
+    expect(isEnvFilename(".envrc")).toBe(false);
+    expect(isEnvFilename(".env_副本")).toBe(false);
+    expect(isEnvFilename(".environment")).toBe(false);
+    expect(isEnvFilename(".env.example")).toBe(false);
+    expect(isEnvFilename(".env.sample")).toBe(false);
+    expect(isEnvFilename(".env.template")).toBe(false);
+    expect(isEnvFilename(".env.")).toBe(false);
+  });
+
+  it("重复 key:按名字操作只动一行,优先启用的那行", () => {
+    const lines = parseEnv("# DB=local\nDB=prod\nX=1\n");
+    expect(findEnvLineIndex(lines, "DB")).toBe(1);
+    expect(serializeEnv(toggleEnvVariable(lines, "DB"))).toBe("# DB=local\n# DB=prod\nX=1\n");
+    expect(serializeEnv(removeEnvVariable(lines, "DB"))).toBe("# DB=local\nX=1\n");
+    expect(serializeEnv(updateEnvVariable(lines, "DB", "new"))).toBe("# DB=local\nDB=new\nX=1\n");
+    // 只有注释掉的那行时,就动它
+    const onlyDisabled = parseEnv("# DB=local\nX=1\n");
+    expect(serializeEnv(addEnvVariable(onlyDisabled, "DB", "v"))).toBe("# DB=v\nX=1\n");
+    expect(countEnvKeys(lines).get("DB")).toBe(2);
+    expect(countEnvKeys(lines).get("X")).toBe(1);
+  });
+
+  it("按行号操作:改名在原位,不会跑到文件末尾;删除/切换只动那一行", () => {
+    const lines = parseEnv("A=1\nB=2\nC=3\n");
+    expect(serializeEnv(updateEnvVariableAt(lines, 1, { key: "BB", value: "22" }))).toBe("A=1\nBB=22\nC=3\n");
+    expect(serializeEnv(removeEnvVariableAt(lines, 1))).toBe("A=1\nC=3\n");
+    expect(serializeEnv(toggleEnvVariableAt(lines, 1))).toBe("A=1\n# B=2\nC=3\n");
+    // 指到非变量行(或越界)原样返回
+    expect(updateEnvVariableAt(parseEnv("# c\n"), 0, { value: "x" })).toEqual(parseEnv("# c\n"));
+    expect(removeEnvVariableAt(lines, 9)).toBe(lines);
+  });
+
+  it("自动加引号:值含 # 或换行时不加引号会读坏,写入时自动包上", () => {
+    expect(formatKVRaw("K", "abc # note")).toBe('K="abc # note"\n');
+    expect(formatKVRaw("K", "a#b")).toBe('K="a#b"\n');
+    expect(formatKVRaw("K", "l1\nl2")).toBe('K="l1\nl2"\n');
+    // 值里已有双引号就改用单引号
+    expect(formatKVRaw("K", 'say "hi" # x')).toBe("K='say \"hi\" # x'\n");
+    // 不需要引号的值保持原样;用户明确选了引号就听用户的
+    expect(formatKVRaw("K", "plain")).toBe("K=plain\n");
+    expect(formatKVRaw("K", "plain", { quote: "'" })).toBe("K='plain'\n");
+    // 写进去再读回来,值一样
+    for (const v of ["abc # note", "a#b", "l1\nl2", 'say "hi" # x']) {
+      const [line] = parseEnv(formatKVRaw("K", v));
+      expect(line).toMatchObject({ type: "kv", key: "K", value: v });
+    }
+  });
+
+  it("多行值:编辑 / 禁用 / 启用都以整条变量为单位,不会腰斩", () => {
+    const lines = parseEnv('MULTI="l1\nl2"\nAFTER=1\n');
+    expect(serializeEnv(updateEnvVariable(lines, "MULTI", "new"))).toBe('MULTI="new"\nAFTER=1\n');
+    const off = toggleEnvVariable(lines, "MULTI");
+    expect(serializeEnv(off)).toBe('# MULTI="l1\n# l2"\nAFTER=1\n');
+    // 禁用后再读,仍然是一条变量;再启用回到原样
+    const reparsed = parseEnv(serializeEnv(off));
+    expect(reparsed).toHaveLength(2);
+    expect(serializeEnv(toggleEnvVariable(reparsed, "MULTI"))).toBe('MULTI="l1\nl2"\nAFTER=1\n');
+  });
+
+  it("addEnvVariable 不修改传入的数组", () => {
+    const lines = parseEnv("A=1");
+    const before = JSON.stringify(lines);
+    addEnvVariable(lines, "B", "2");
+    expect(JSON.stringify(lines)).toBe(before);
+  });
+
+  it("export 前缀:编辑 / 启停 / 生成 example 都保留", () => {
+    const lines = parseEnv("export A=1\nB=2\n");
+    expect(serializeEnv(updateEnvVariable(lines, "A", "9"))).toBe("export A=9\nB=2\n");
+    expect(serializeEnv(toggleEnvVariable(lines, "A"))).toBe("# export A=1\nB=2\n");
+    expect(generateExampleEnv(lines)).toBe("export A=\nB=\n");
+    expect(serializeEnv(addEnvVariable(parseEnv(""), "C", "3", { exportPrefix: true }))).toBe("export C=3\n");
+  });
+
+  it("自动加引号:首尾空格、以引号字符开头、含反斜杠 n 的值", () => {
+    expect(formatKVRaw("K", " padded ")).toBe('K=" padded "\n');
+    expect(formatKVRaw("K", '"abc')).toBe("K='\"abc'\n");
+    // 含 \\n 字面量的值不加引号也能原样读回(dotenv 只在双引号里展开);真要加引号时选单引号
+    expect(formatKVRaw("K", "a\\nb")).toBe("K=a\\nb\n");
+    expect(formatKVRaw("K", "a\\nb #")).toBe("K='a\\nb #'\n");
+    for (const v of [" padded ", '"abc', "a\\nb", "a\\nb #"]) {
+      expect(parseEnv(formatKVRaw("K", v))[0]).toMatchObject({ value: v });
+    }
+  });
+
+  it("isSecretKey: 名单里带 ! 的条目表示用户说不是敏感,优先于内置规则", () => {
+    expect(isSecretKey("PUBLIC_KEY")).toBe(true);
+    expect(isSecretKey("PUBLIC_KEY", ["!PUBLIC_KEY"])).toBe(false);
+    expect(isSecretKey("PUBLIC_KEY", ["!public_key"])).toBe(false);
+    expect(isSecretKey("PORT", ["PORT"])).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ import {
   matchesDeclaredType,
   parseShellConfig,
   removeShellSnippet,
+  sameShellSnippet,
   toggleShellSnippet,
   updateShellSnippet,
   type ShellSnippet,
@@ -321,5 +322,14 @@ describe("shellTrack", () => {
       { key: "JAVA_HOME", value: "/opt/jdk" },
       { key: "PLAIN", value: "abc" },
     ]);
+  });
+
+  it("sameShellSnippet: 七个字段都比,缺省字段按空值归一;都不存在算一样", () => {
+    const base: ShellSnippet = { id: "1", name: "n", type: "export", content: "export A=1", enabled: true };
+    expect(sameShellSnippet(base, { ...base, description: "" })).toBe(true);
+    expect(sameShellSnippet(base, { ...base, group: "Java" })).toBe(false);
+    expect(sameShellSnippet(base, { ...base, containsSecret: true })).toBe(false);
+    expect(sameShellSnippet(undefined, undefined)).toBe(true);
+    expect(sameShellSnippet(base, undefined)).toBe(false);
   });
 });

@@ -1,39 +1,134 @@
 import { createHash } from "node:crypto";
-import type { EnvLine } from "./parseEnv.js";
+import type { EnvLine, EnvQuote } from "./parseEnv.js";
 
 const DEFAULT_SECRET_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/i;
 
 export interface EnvVariableOptions {
-  quote?: "'" | '"' | null;
+  quote?: EnvQuote | null;
   disabled?: boolean;
   /** 行内注释正文(不含 `#`)。传空串表示去掉注释;不传表示沿用原有的 */
   comment?: string;
+  /** 行首带 `export `;不传表示沿用原有的 */
+  exportPrefix?: boolean;
 }
 
 /**
- * 格式化单行 KV 文本
+ * 值不加引号就写不回去的情况(按 dotenv 的读法):
+ * 含换行(引号才能跨行)、含 `#`(会被当成注释截断)、首尾有空格(无引号会被 trim 掉)、以引号字符开头
+ */
+function needsQuotes(value: string): boolean {
+  return /[\r\n#]/.test(value) || value !== value.trim() || /^["'`]/.test(value);
+}
+
+/**
+ * 用户选的引号形态 + 值本身,决定最终写进文件的引号。
+ * 用户明确选了就听用户的;没选但值不加引号就会读坏时,自动加。
+ * 优先双引号;值里已有双引号、或含 `\n` 这种反斜杠序列(双引号里会被 dotenv 展开成换行)时,改用单引号
+ */
+export function resolveQuote(value: string, quote: EnvQuote | null | undefined): EnvQuote | null {
+  if (quote) return quote;
+  if (!needsQuotes(value)) return null;
+  const preferSingle = !value.includes("'") && (value.includes('"') || /\\[nr]/.test(value));
+  return preferSingle ? "'" : '"';
+}
+
+/**
+ * 格式化单行 KV 文本。值含换行时会写成多个物理行(引号包住);
+ * 这时"禁用"要给每一个物理行都加 `# `,否则重新读取时只有第一行是注释
  */
 export function formatKVRaw(
   key: string,
   value: string,
   options: {
-    quote?: "'" | '"' | null;
+    quote?: EnvQuote | null;
     disabled?: boolean;
     end?: "\n" | "\r\n" | "";
     comment?: string;
+    exportPrefix?: boolean;
   } = {}
 ): string {
-  const { quote = null, disabled = false, end = "\n", comment } = options;
+  const { disabled = false, end = "\n", comment, exportPrefix = false } = options;
+  const quote = resolveQuote(value, options.quote);
   const quotedValue = quote ? `${quote}${value}${quote}` : value;
-  const prefix = disabled ? "# " : "";
   // 注释统一重排成 ` # 正文`。只有被编辑过的行才会走到这里重建 raw,
   // 没动过的行始终原样保留,所以不会全文重排空格
   const trailing = comment && comment.trim() !== "" ? ` # ${comment.trim()}` : "";
-  return `${prefix}${key}=${quotedValue}${trailing}${end}`;
+  const body = `${exportPrefix ? "export " : ""}${key}=${quotedValue}${trailing}`;
+  const prefixed = disabled ? `# ${body.replace(/(\r?\n)/g, "$1# ")}` : body;
+  return `${prefixed}${end}`;
 }
 
 /**
- * 更新已有的环境变量值，保持原注释状态、换行符和原有引用格式
+ * 按名字找"该动哪一行":优先第一条启用的,没有启用的就取第一条。
+ * 同一个 key 写了两行是常见写法(一行注释掉留着备用),按名字全量匹配会把两行一起改掉
+ */
+export function findEnvLineIndex(lines: EnvLine[], key: string): number {
+  const enabled = lines.findIndex((l) => l.type === "kv" && l.key === key && !l.disabled);
+  if (enabled >= 0) return enabled;
+  return lines.findIndex((l) => l.type === "kv" && l.key === key);
+}
+
+/** 每个 key 在文件里出现了几行(启用 + 注释掉的都算),用来在界面上标出"重复" */
+export function countEnvKeys(lines: EnvLine[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const l of lines) {
+    if (l.type === "kv") counts.set(l.key, (counts.get(l.key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export interface EnvLinePatch extends EnvVariableOptions {
+  /** 改名;不传保持原名 */
+  key?: string;
+  value: string;
+}
+
+/**
+ * 只改第 index 行(必须是 kv 行),原位重建,其他行一个字符不动。
+ * 改名也在原位:此前"改名 = 删旧行 + 追加到末尾",变量会跑到文件最底下
+ */
+export function updateEnvVariableAt(lines: EnvLine[], index: number, patch: EnvLinePatch): EnvLine[] {
+  const line = lines[index];
+  if (!line || line.type !== "kv") return lines;
+
+  const key = patch.key ?? line.key;
+  const quote = resolveQuote(patch.value, patch.quote !== undefined ? patch.quote : line.quote);
+  const disabled = patch.disabled !== undefined ? patch.disabled : line.disabled;
+  const comment = patch.comment !== undefined ? patch.comment : line.comment;
+  const exportPrefix = patch.exportPrefix !== undefined ? patch.exportPrefix : (line.exportPrefix ?? false);
+  const end = line.end;
+
+  const next: EnvLine = {
+    type: "kv",
+    key,
+    value: patch.value,
+    quote,
+    disabled,
+    comment: comment === "" ? undefined : comment,
+    exportPrefix: exportPrefix || undefined,
+    end,
+    raw: formatKVRaw(key, patch.value, { quote, disabled, end, comment, exportPrefix }),
+  };
+  return lines.map((l, i) => (i === index ? next : l));
+}
+
+/** 删掉第 index 行 */
+export function removeEnvVariableAt(lines: EnvLine[], index: number): EnvLine[] {
+  const line = lines[index];
+  if (!line || line.type !== "kv") return lines;
+  return lines.filter((_, i) => i !== index);
+}
+
+/** 切换第 index 行的启用/禁用(在 `KEY=val` 与 `# KEY=val` 之间切换) */
+export function toggleEnvVariableAt(lines: EnvLine[], index: number): EnvLine[] {
+  const line = lines[index];
+  if (!line || line.type !== "kv") return lines;
+  return updateEnvVariableAt(lines, index, { value: line.value, disabled: !line.disabled });
+}
+
+/**
+ * 按名字更新值,保持原注释状态、换行符和原有引用格式。
+ * 只动 findEnvLineIndex 选中的那一行
  */
 export function updateEnvVariable(
   lines: EnvLine[],
@@ -41,29 +136,14 @@ export function updateEnvVariable(
   newValue: string,
   options?: EnvVariableOptions
 ): EnvLine[] {
-  return lines.map((line) => {
-    if (line.type !== "kv" || line.key !== key) return line;
-
-    const quote = options?.quote !== undefined ? options.quote : line.quote;
-    const disabled = options?.disabled !== undefined ? options.disabled : line.disabled;
-    const comment = options?.comment !== undefined ? options.comment : line.comment;
-    const end = line.end;
-
-    return {
-      type: "kv",
-      key: line.key,
-      value: newValue,
-      quote,
-      disabled,
-      comment: comment === "" ? undefined : comment,
-      end,
-      raw: formatKVRaw(line.key, newValue, { quote, disabled, end, comment }),
-    };
-  });
+  const index = findEnvLineIndex(lines, key);
+  if (index < 0) return lines;
+  return updateEnvVariableAt(lines, index, { value: newValue, ...options });
 }
 
 /**
- * 新增环境变量，若已存在则更新，若不存在则追加到末尾
+ * 新增环境变量,若已存在则更新那一行(优先启用的那行),若不存在则追加到末尾。
+ * 不修改传入的数组:上一版会原地给最后一行补换行,React 那边拿着的旧状态会跟着变
  */
 export function addEnvVariable(
   lines: EnvLine[],
@@ -71,24 +151,22 @@ export function addEnvVariable(
   value: string,
   options?: EnvVariableOptions
 ): EnvLine[] {
-  const exists = lines.some((l) => l.type === "kv" && l.key === key);
-  if (exists) {
-    return updateEnvVariable(lines, key, value, options);
+  const existing = findEnvLineIndex(lines, key);
+  if (existing >= 0) {
+    return updateEnvVariableAt(lines, existing, { value, ...options });
   }
 
   const result = [...lines];
   // 确保前一行有换行符
-  if (result.length > 0) {
-    const last = result[result.length - 1];
-    if (last && last.end === "") {
-      last.end = "\n";
-      last.raw = last.raw + "\n";
-    }
+  const last = result[result.length - 1];
+  if (last && last.end === "") {
+    result[result.length - 1] = { ...last, end: "\n", raw: last.raw + "\n" };
   }
 
-  const quote = options?.quote ?? null;
+  const quote = resolveQuote(value, options?.quote ?? null);
   const disabled = options?.disabled ?? false;
   const comment = options?.comment?.trim() ? options.comment : undefined;
+  const exportPrefix = options?.exportPrefix ?? false;
   const end: "\n" = "\n";
 
   result.push({
@@ -98,39 +176,24 @@ export function addEnvVariable(
     quote,
     disabled,
     comment,
+    exportPrefix: exportPrefix || undefined,
     end,
-    raw: formatKVRaw(key, value, { quote, disabled, end, comment }),
+    raw: formatKVRaw(key, value, { quote, disabled, end, comment, exportPrefix }),
   });
 
   return result;
 }
 
-/**
- * 删除指定 key 的环境变量
- */
+/** 按名字删除(只删 findEnvLineIndex 选中的那一行) */
 export function removeEnvVariable(lines: EnvLine[], key: string): EnvLine[] {
-  return lines.filter((line) => !(line.type === "kv" && line.key === key));
+  const index = findEnvLineIndex(lines, key);
+  return index < 0 ? lines : removeEnvVariableAt(lines, index);
 }
 
-/**
- * 切换指定 key 的启用/禁用状态（在 `KEY=val` 与 `# KEY=val` 之间切换）
- */
+/** 按名字切换启用/禁用(只动 findEnvLineIndex 选中的那一行) */
 export function toggleEnvVariable(lines: EnvLine[], key: string): EnvLine[] {
-  return lines.map((line) => {
-    if (line.type !== "kv" || line.key !== key) return line;
-
-    const newDisabled = !line.disabled;
-    return {
-      ...line,
-      disabled: newDisabled,
-      raw: formatKVRaw(line.key, line.value, {
-        quote: line.quote,
-        disabled: newDisabled,
-        end: line.end,
-        comment: line.comment,
-      }),
-    };
-  });
+  const index = findEnvLineIndex(lines, key);
+  return index < 0 ? lines : toggleEnvVariableAt(lines, index);
 }
 
 /**
@@ -143,7 +206,7 @@ export function generateExampleEnv(lines: EnvLine[]): string {
       if (line.type !== "kv") {
         return line.raw;
       }
-      const prefix = line.disabled ? "# " : "";
+      const prefix = `${line.disabled ? "# " : ""}${line.exportPrefix ? "export " : ""}`;
       // 行内注释要留下:.env.example 是给团队看的模板,
       // 逐个变量的说明恰恰是最该保留的部分(值才是要清空的)
       const trailing = line.comment ? ` # ${line.comment}` : "";
@@ -205,7 +268,7 @@ export function mergeExampleEnv(existingExampleLines: EnvLine[], envLines: EnvLi
   for (const kv of envKvs) {
     if (seenInExample.has(kv.key)) continue;
     added.push(kv.key);
-    const prefix = kv.disabled ? "# " : "";
+    const prefix = `${kv.disabled ? "# " : ""}${kv.exportPrefix ? "export " : ""}`;
     const trailing = kv.comment ? ` # ${kv.comment}` : "";
     out.push(`${prefix}${kv.key}=${trailing}\n`);
   }
@@ -219,12 +282,22 @@ export function mergeExampleEnv(existingExampleLines: EnvLine[], envLines: EnvLi
 }
 
 /**
- * 判断是否为敏感字段
- * 匹配内置规则 (KEY, TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL)，或项目自定义敏感列表
+ * 项目名单里"用户说这个不是敏感"的条目带这个前缀,如 `!PUBLIC_KEY`。
+ * 内置规则按关键词猜(KEY / TOKEN / …),`PUBLIC_KEY`、`KEY_PREFIX` 会被猜错,
+ * 此前"取消敏感标记"只是把名字加进名单,内置规则照样命中,取消等于没取消。
+ * 放进同一份名单而不是另开字段:名单本来就是"用户对这个项目的敏感判断",一处存完
+ */
+export const SECRET_IGNORE_PREFIX = "!";
+
+/**
+ * 判断是否为敏感字段。优先级:用户说不是 > 用户说是 > 内置规则
+ * (KEY, TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL)。名单按项目存,不跨项目
  */
 export function isSecretKey(key: string, customSecrets?: string[]): boolean {
-  if (customSecrets && customSecrets.some((s) => s.toLowerCase() === key.toLowerCase())) {
-    return true;
+  const lower = key.toLowerCase();
+  if (customSecrets) {
+    if (customSecrets.some((s) => s.toLowerCase() === `${SECRET_IGNORE_PREFIX}${lower}`)) return false;
+    if (customSecrets.some((s) => s.toLowerCase() === lower)) return true;
   }
   return DEFAULT_SECRET_PATTERN.test(key);
 }
@@ -314,11 +387,21 @@ export function diffEnvVariables(baseLines: EnvLine[], targetLines: EnvLine[]): 
   return result.sort((a, b) => order[a.type] - order[b.type] || a.key.localeCompare(b.key));
 }
 
-const ENV_FILENAME_RE = /^\.env(\.[A-Za-z0-9_-]+)?$/;
+/** `.env` 或 `.env.<段>.<段>…`,每段只允许字母数字下划线短横线(`.env.development.local` 是 Next / Vite 的标准命名) */
+const ENV_FILENAME_RE = /^\.env(\.[A-Za-z0-9_-]+)*$/;
+
+/** 模板文件:形态像环境文件,但里面没有真实值,不当环境文件管理(生成 .env.example 有专门的动作) */
+export const ENV_TEMPLATE_FILENAMES: ReadonlySet<string> = new Set([".env.example", ".env.sample", ".env.template"]);
 
 /**
- * 校验新建的环境文件名是否合法(必须是 .env 或 .env.<后缀>,后缀仅允许字母数字下划线短横线)
+ * 这个文件名算不算"环境文件"。白名单而不是"以 .env 开头":
+ * `.envrc` 是 direnv 的 shell 脚本(设计上绝不能碰)、`.env_副本` / `.environment` 也都不是
  */
+export function isEnvFilename(filename: string): boolean {
+  return ENV_FILENAME_RE.test(filename) && !ENV_TEMPLATE_FILENAMES.has(filename);
+}
+
+/** 校验新建的环境文件名是否合法(同 isEnvFilename,允许前后空白) */
 export function isValidEnvFilename(filename: string): boolean {
-  return ENV_FILENAME_RE.test(filename.trim());
+  return isEnvFilename(filename.trim());
 }

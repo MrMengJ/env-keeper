@@ -12,6 +12,7 @@ import {
   touchProject,
 } from "./registry.js";
 import { ConfigFileError } from "./configFile.js";
+import { isSecretKey } from "./envOps.js";
 
 describe("registry", () => {
   it("parseRegistry & formatRegistry: 空内容当新装,坏内容必须抛错", () => {
@@ -87,10 +88,11 @@ describe("registry", () => {
       path: "/path",
     });
 
-    const added = toggleProjectSecret(r1, p1.id, "MY_CUSTOM_SECRET");
-    expect(added.projects[0]?.customSecrets).toContain("MY_CUSTOM_SECRET");
+    // 名字要选一个内置规则认不出来的,否则"标记"会变成"取消规则的判断"
+    const added = toggleProjectSecret(r1, p1.id, "MY_CUSTOM_FIELD");
+    expect(added.projects[0]?.customSecrets).toContain("MY_CUSTOM_FIELD");
 
-    const removed = toggleProjectSecret(added, p1.id, "my_custom_secret");
+    const removed = toggleProjectSecret(added, p1.id, "my_custom_field");
     expect(removed.projects[0]?.customSecrets).toHaveLength(0);
   });
 
@@ -144,5 +146,24 @@ describe("registry", () => {
     const again = addProject(moved, { name: "改个名", path: "/tmp/new" });
     expect(again.registry.projects).toHaveLength(1);
     expect(again.project.id).toBe(id);
+  });
+
+  it("toggleProjectSecret: 对内置规则识别的字段能真的取消,再点又能恢复;手动标的能拿掉", () => {
+    let reg = addProject(createEmptyRegistry(), { name: "p", path: "/p" }).registry;
+    const id = reg.projects[0]!.id;
+    const secrets = () => reg.projects[0]!.customSecrets ?? [];
+
+    reg = toggleProjectSecret(reg, id, "PUBLIC_KEY"); // 规则说是 → 用户说不是
+    expect(isSecretKey("PUBLIC_KEY", secrets())).toBe(false);
+    expect(secrets()).toEqual(["!PUBLIC_KEY"]);
+    reg = toggleProjectSecret(reg, id, "PUBLIC_KEY"); // 再点 → 回到规则
+    expect(isSecretKey("PUBLIC_KEY", secrets())).toBe(true);
+    expect(secrets()).toEqual([]);
+
+    reg = toggleProjectSecret(reg, id, "PORT"); // 规则说不是 → 用户说是
+    expect(isSecretKey("PORT", secrets())).toBe(true);
+    reg = toggleProjectSecret(reg, id, "PORT");
+    expect(isSecretKey("PORT", secrets())).toBe(false);
+    expect(secrets()).toEqual([]);
   });
 });

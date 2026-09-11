@@ -12,7 +12,9 @@ export type ConfigFailureReason =
   /** JSON 语法坏了,或者根本不是一个对象 */
   | "malformed"
   /** 文件来自更新版本的扩展(用户降级了),当旧版处理会把不认识的新字段写没 */
-  | "tooNew";
+  | "tooNew"
+  /** 文件在,但读不出来(权限、IO 错误)。不是"没配过",此时绝不能写 */
+  | "unreadable";
 
 export class ConfigFileError extends Error {
   readonly reason: ConfigFailureReason;

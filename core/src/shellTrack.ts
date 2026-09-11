@@ -249,8 +249,13 @@ export interface ShellSnippetDiffEntry {
   after?: ShellSnippet;
 }
 
-/** 两个片段在用户看得见的层面是否等价 */
-function sameSnippet(a: ShellSnippet, b: ShellSnippet): boolean {
+/**
+ * 两个片段在用户看得见的层面是否等价(都不存在也算一样)。
+ * 导出给界面的历史页共用:此前界面自己抄了一份,加 group 字段时漏改,只改分组的版本在历史里就消失了
+ */
+export function sameShellSnippet(a: ShellSnippet | undefined, b: ShellSnippet | undefined): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
   return (
     a.name === b.name &&
     a.type === b.type &&
@@ -281,7 +286,7 @@ export function diffShellSnippets(base: ShellSnippet[], target: ShellSnippet[]):
     } else if (!before && after) {
       result.push({ type: "added", id, name: after.name, after });
     } else if (before && after) {
-      const changed = !sameSnippet(before, after);
+      const changed = !sameShellSnippet(before, after);
       result.push({
         type: changed ? "changed" : "unchanged",
         id,

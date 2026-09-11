@@ -1,4 +1,5 @@
 import { parseVersionedConfig } from "./configFile.js";
+import { isSecretKey, SECRET_IGNORE_PREFIX } from "./envOps.js";
 
 export interface ProjectMeta {
   id: string;
@@ -137,25 +138,33 @@ export function touchProject(registry: RegistryData, projectId: string, now = Da
   };
 }
 
-export function toggleProjectSecret(
-  registry: RegistryData,
-  projectId: string,
-  key: string
-): RegistryData {
+/**
+ * 切换某个变量在本项目里的敏感标记。名单里的条目有两种:`KEY`(用户说是)、`!KEY`(用户说不是)。
+ * - 现在是敏感的:是用户手动标的就把 `KEY` 拿掉;是内置规则猜的就加一条 `!KEY`
+ * - 现在不是敏感的:是用户排除过的就把 `!KEY` 拿掉;否则加一条 `KEY`
+ * 只影响本项目——同一个名字在不同项目里敏感程度可能不同,而且打码宁可多不可少
+ */
+export function toggleProjectSecret(registry: RegistryData, projectId: string, key: string): RegistryData {
   return {
     ...registry,
     projects: registry.projects.map((p) => {
       if (p.id !== projectId) return p;
       const secrets = p.customSecrets ?? [];
       const lower = key.toLowerCase();
-      const exists = secrets.some((s) => s.toLowerCase() === lower);
-      const nextSecrets = exists
-        ? secrets.filter((s) => s.toLowerCase() !== lower)
-        : [...secrets, key];
-      return {
-        ...p,
-        customSecrets: nextSecrets,
-      };
+      const ignored = `${SECRET_IGNORE_PREFIX}${lower}`;
+      const isManual = secrets.some((s) => s.toLowerCase() === lower);
+      const isIgnored = secrets.some((s) => s.toLowerCase() === ignored);
+      const secretNow = isSecretKey(key, secrets);
+
+      let nextSecrets: string[];
+      if (secretNow) {
+        nextSecrets = isManual
+          ? secrets.filter((s) => s.toLowerCase() !== lower)
+          : [...secrets, `${SECRET_IGNORE_PREFIX}${key}`];
+      } else {
+        nextSecrets = isIgnored ? secrets.filter((s) => s.toLowerCase() !== ignored) : [...secrets, key];
+      }
+      return { ...p, customSecrets: nextSecrets };
     }),
   };
 }
