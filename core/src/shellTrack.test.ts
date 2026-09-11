@@ -5,6 +5,7 @@ import {
   formatShellConfig,
   diffShellSnippets,
   extractShellAssignments,
+  findShellConflicts,
   generateShellScript,
   moveShellSnippet,
   maskShellContent,
@@ -210,6 +211,49 @@ describe("shellTrack", () => {
     expect(all).toContain("# 说明");
     expect(all).not.toContain("some_command");
     expect(all).toContain("export A=••••••••");
+  });
+
+  it("findShellConflicts 找出两个已启用片段设置同一个变量 / alias,后者生效", () => {
+    const mk = (id: string, content: string, enabled = true): ShellSnippet => ({
+      id,
+      name: `片段${id}`,
+      type: "snippet",
+      content,
+      enabled,
+    });
+    const snippets = [
+      mk("a", 'export JAVA_HOME="/opt/jdk8"\nexport PATH="$JAVA_HOME/bin:$PATH"'),
+      mk("b", 'export JAVA_HOME="/opt/jdk17"\nexport PATH="${PATH}:/x"'),
+      mk("c", "export JAVA_HOME=/opt/jdk21", false),
+      mk("d", "alias ll='ls -la'\nalias gs='git status'"),
+      mk("e", "alias ll='eza -l'"),
+      // 同一片段内重复不算
+      mk("f", "X=1\nX=2"),
+    ];
+
+    const conflicts = findShellConflicts(snippets);
+    expect(conflicts).toEqual([
+      {
+        kind: "variable",
+        name: "JAVA_HOME",
+        snippets: [
+          { id: "a", name: "片段a" },
+          { id: "b", name: "片段b" },
+        ],
+        effectiveId: "b",
+      },
+      {
+        kind: "alias",
+        name: "ll",
+        snippets: [
+          { id: "d", name: "片段d" },
+          { id: "e", name: "片段e" },
+        ],
+        effectiveId: "e",
+      },
+    ]);
+    // PATH 两边都是追加,不在冲突里
+    expect(conflicts.some((c) => c.name === "PATH")).toBe(false);
   });
 
   it("extractShellAssignments 抽出片段里的变量", () => {

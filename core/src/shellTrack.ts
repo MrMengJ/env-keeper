@@ -250,6 +250,57 @@ export function extractShellAssignments(content: string): ShellAssignment[] {
   return result;
 }
 
+const SHELL_ALIAS_RE = /^\s*alias\s+([^\s=]+)=/;
+
+export interface ShellConflict {
+  kind: "variable" | "alias";
+  /** 变量名或 alias 名 */
+  name: string;
+  /** 卷入的片段,按生成顺序;全部是已启用的 */
+  snippets: { id: string; name: string }[];
+  /** 生成顺序最靠后的那份,shell 里最终以它为准 */
+  effectiveId: string;
+}
+
+/**
+ * 找出"两个已启用的片段设置了同一个变量 / 同名 alias"。
+ * 这是"一个片段一个开关"这条路欠的:互斥的两个值是两个片段,没人拦着把它们同时打开,
+ * 而 shell 里静默地以后者为准,用户很难察觉。这里只提示,不阻断。
+ *
+ * `PATH="$PATH:/x"` 这种引用自己的追加写法不算冲突——两个片段都往 PATH 里加东西是累积,不是互斥。
+ * 同一片段内重复赋值同一个 key 也不算:那是片段自己的事。
+ */
+export function findShellConflicts(snippets: ShellSnippet[]): ShellConflict[] {
+  const active = snippets.filter((s) => s.enabled && s.content.trim() !== "");
+  const owners = new Map<string, { kind: ShellConflict["kind"]; name: string; ids: Map<string, string> }>();
+
+  const claim = (kind: ShellConflict["kind"], name: string, snippet: ShellSnippet) => {
+    const mapKey = `${kind}:${name}`;
+    const entry = owners.get(mapKey) ?? { kind, name, ids: new Map<string, string>() };
+    entry.ids.set(snippet.id, snippet.name);
+    owners.set(mapKey, entry);
+  };
+
+  for (const snippet of active) {
+    for (const { key, value } of extractShellAssignments(snippet.content)) {
+      if (value.includes(`$${key}`) || value.includes(`\${${key}`)) continue;
+      claim("variable", key, snippet);
+    }
+    for (const line of snippet.content.split("\n")) {
+      const match = SHELL_ALIAS_RE.exec(line);
+      if (match?.[1]) claim("alias", match[1], snippet);
+    }
+  }
+
+  const conflicts: ShellConflict[] = [];
+  for (const { kind, name, ids } of owners.values()) {
+    if (ids.size < 2) continue;
+    const involved = [...ids.entries()].map(([id, snippetName]) => ({ id, name: snippetName }));
+    conflicts.push({ kind, name, snippets: involved, effectiveId: involved[involved.length - 1]!.id });
+  }
+  return conflicts;
+}
+
 /**
  * 把片段内容里的敏感值打码,用于界面展示。
  *
