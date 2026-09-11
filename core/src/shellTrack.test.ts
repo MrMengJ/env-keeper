@@ -7,6 +7,10 @@ import {
   extractShellAssignments,
   findShellConflicts,
   generateShellScript,
+  groupShellSnippets,
+  listShellGroups,
+  renameShellGroup,
+  setShellGroupEnabled,
   moveShellSnippet,
   maskShellContent,
   matchesDeclaredType,
@@ -211,6 +215,53 @@ describe("shellTrack", () => {
     expect(all).toContain("# 说明");
     expect(all).not.toContain("some_command");
     expect(all).toContain("export A=••••••••");
+  });
+
+  it("分组:字段裁剪、分桶按首次出现顺序、整组改名 / 解散 / 启停", () => {
+    const mk = (id: string, group: string | undefined, enabled = true): Omit<ShellSnippet, "id"> & { id: string } => ({
+      id,
+      name: id,
+      type: "snippet",
+      content: `echo ${id}`,
+      enabled,
+      group,
+    });
+    let config = createEmptyShellConfig();
+    // 生成顺序:a(Java) b(代理) c(Java) d(无) e(代理,已禁用)
+    for (const snip of [mk("a", " Java "), mk("b", "代理"), mk("c", "Java"), mk("d", undefined), mk("e", "代理", false)]) {
+      config = addShellSnippet(config, snip).config;
+    }
+    expect(config.snippets[0]?.group).toBe("Java");
+    expect(listShellGroups(config)).toEqual(["Java", "代理"]);
+
+    const buckets = groupShellSnippets(config.snippets);
+    expect(buckets.map((b) => b.group)).toEqual(["Java", "代理", undefined]);
+    expect(buckets[0]?.snippets.map((s) => s.name)).toEqual(["a", "c"]);
+    expect(buckets[1]?.snippets.map((s) => s.name)).toEqual(["b", "e"]);
+
+    // 更新时空串 = 取消分组
+    const ungroupedA = updateShellSnippet(config, config.snippets[0]!.id, { group: "  " });
+    expect(ungroupedA.snippets[0]?.group).toBeUndefined();
+    // 没提 group 就不动
+    expect(updateShellSnippet(config, config.snippets[0]!.id, { enabled: false }).snippets[0]?.group).toBe("Java");
+
+    const renamed = renameShellGroup(config, "Java", "JDK");
+    expect(listShellGroups(renamed)).toEqual(["JDK", "代理"]);
+    // 合并进已有的组
+    expect(listShellGroups(renameShellGroup(config, "Java", "代理"))).toEqual(["代理"]);
+    // 解散
+    expect(listShellGroups(renameShellGroup(config, "Java", ""))).toEqual(["代理"]);
+    expect(renameShellGroup(config, "Java", "Java")).toBe(config);
+
+    const allOff = setShellGroupEnabled(config, "代理", false);
+    expect(allOff.snippets.map((s) => s.enabled)).toEqual([true, false, true, true, false]);
+    const allOn = setShellGroupEnabled(config, "代理", true);
+    expect(allOn.snippets.map((s) => s.enabled)).toEqual([true, true, true, true, true]);
+
+    // 生成文件的注释头带组名;分组不影响顺序
+    const script = generateShellScript(config.snippets);
+    expect(script).toContain("# [SNIPPET] a (Java)");
+    expect(script.indexOf("echo a")).toBeLessThan(script.indexOf("echo b"));
   });
 
   it("findShellConflicts 找出两个已启用片段设置同一个变量 / alias,后者生效", () => {

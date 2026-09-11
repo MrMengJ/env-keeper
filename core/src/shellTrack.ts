@@ -16,6 +16,11 @@ export interface ShellSnippet {
    * 勾了就整段打码,作为自动识别之外的兜底。
    */
   containsSecret?: boolean;
+  /**
+   * 自由文本分组,同项目轨方案的 group:不是独立实体,没人用某个组名它就自然不存在。
+   * 只管列表怎么分区,不影响 shell.sh 的生成顺序
+   */
+  group?: string;
 }
 
 export interface ShellConfig {
@@ -61,6 +66,12 @@ export function formatShellConfig(config: ShellConfig): string {
   return JSON.stringify(config, null, 2) + "\n";
 }
 
+/** 分组名统一裁剪,空串等于没分组,避免 "Java" 和 "Java " 变成两个组 */
+function normalizeGroup(group: string | undefined): string | undefined {
+  const trimmed = group?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export function addShellSnippet(
   config: ShellConfig,
   snippet: Omit<ShellSnippet, "id">
@@ -68,6 +79,7 @@ export function addShellSnippet(
   const id = `sh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const newSnippet: ShellSnippet = {
     ...snippet,
+    group: normalizeGroup(snippet.group),
     id,
   };
   return {
@@ -86,7 +98,72 @@ export function updateShellSnippet(
 ): ShellConfig {
   return {
     ...config,
-    snippets: config.snippets.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+    snippets: config.snippets.map((s) => {
+      if (s.id !== id) return s;
+      const next = { ...s, ...updates };
+      if ("group" in updates) next.group = normalizeGroup(updates.group);
+      return next;
+    }),
+  };
+}
+
+/** 已经用过的分组名,去重、按名字排序——填表单时列出来供选 */
+export function listShellGroups(config: ShellConfig): string[] {
+  const groups = new Set<string>();
+  for (const s of config.snippets) {
+    if (s.group) groups.add(s.group);
+  }
+  return [...groups].sort((a, b) => a.localeCompare(b));
+}
+
+export interface ShellGroupBucket {
+  /** undefined 表示未分组 */
+  group: string | undefined;
+  snippets: ShellSnippet[];
+}
+
+/**
+ * 按分组分桶。组的先后 = 组内第一条片段在生成顺序里的位置,未分组固定最后;
+ * 桶内保持生成顺序。这样列表里的 #n 大致递增,也不用为"组的顺序"另外存任何东西。
+ * (方案那边组按字母排,因为方案没有顺序这个概念)
+ */
+export function groupShellSnippets(snippets: ShellSnippet[]): ShellGroupBucket[] {
+  const byGroup = new Map<string, ShellSnippet[]>();
+  const ungrouped: ShellSnippet[] = [];
+  for (const s of snippets) {
+    if (!s.group) {
+      ungrouped.push(s);
+      continue;
+    }
+    const bucket = byGroup.get(s.group);
+    if (bucket) bucket.push(s);
+    else byGroup.set(s.group, [s]);
+  }
+  // Map 保持插入顺序 = 第一条片段出现的顺序
+  const buckets: ShellGroupBucket[] = [...byGroup.entries()].map(([group, items]) => ({ group, snippets: items }));
+  if (ungrouped.length > 0) buckets.push({ group: undefined, snippets: ungrouped });
+  return buckets;
+}
+
+/**
+ * 整组改名;`to` 为空等于解散(组内片段全部变成未分组)。
+ * 分组只是散落在每条片段上的字段,逐条改容易漏,漏一条就分裂成两个组——这里一次改完。
+ * 新名字撞上已有的组等于合并,由界面在调用前确认
+ */
+export function renameShellGroup(config: ShellConfig, from: string, to: string | undefined): ShellConfig {
+  const target = normalizeGroup(to);
+  if (target === from) return config;
+  return {
+    ...config,
+    snippets: config.snippets.map((s) => (s.group === from ? { ...s, group: target } : s)),
+  };
+}
+
+/** 整组启用 / 禁用。"场景"的轻量版:不新增实体、不保存状态 */
+export function setShellGroupEnabled(config: ShellConfig, group: string, enabled: boolean): ShellConfig {
+  return {
+    ...config,
+    snippets: config.snippets.map((s) => (s.group === group && s.enabled !== enabled ? { ...s, enabled } : s)),
   };
 }
 
@@ -179,7 +256,9 @@ function sameSnippet(a: ShellSnippet, b: ShellSnippet): boolean {
     a.type === b.type &&
     a.content === b.content &&
     a.enabled === b.enabled &&
-    (a.description ?? "") === (b.description ?? "")
+    (a.description ?? "") === (b.description ?? "") &&
+    (a.group ?? "") === (b.group ?? "") &&
+    (a.containsSecret ?? false) === (b.containsSecret ?? false)
   );
 }
 
@@ -347,8 +426,9 @@ export function generateShellScript(snippets: ShellSnippet[]): string {
   ];
 
   for (const item of activeSnippets) {
+    const group = item.group ? ` (${item.group})` : "";
     const desc = item.description ? ` - ${item.description}` : "";
-    lines.push(`# [${item.type.toUpperCase()}] ${item.name}${desc}`);
+    lines.push(`# [${item.type.toUpperCase()}] ${item.name}${group}${desc}`);
     lines.push(item.content.trim());
     lines.push("");
   }
