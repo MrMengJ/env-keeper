@@ -165,6 +165,31 @@ export function listPresetGroups(file: PresetsFile, projectId: string): string[]
   return [...groups].sort((a, b) => a.localeCompare(b));
 }
 
+/**
+ * 把本项目里某个分组整体改名;`to` 为空等于解散这个组(组内方案全部变成未分组)。
+ * 分组只是散落在每份方案上的一个字段,没有独立实体,所以"改组名"只能是把这些方案挨个改掉——
+ * 这里一次做完、一次写入,免得用户逐份改漏一份就分裂成两个组。
+ * 只动本项目:别的项目里同名的组只是碰巧同名,彼此无关。
+ * 新名字撞上本项目已有的组时等于合并,由界面在调用前确认。
+ */
+export function renamePresetGroup(
+  file: PresetsFile,
+  projectId: string,
+  from: string,
+  to: string | undefined,
+  now: Date = new Date()
+): PresetsFile {
+  const target = normalizeGroup(to);
+  if (target === from) return file;
+  const iso = now.toISOString();
+  return {
+    ...file,
+    presets: file.presets.map((p) =>
+      p.projectId === projectId && p.group === from ? { ...p, group: target, updatedAt: iso } : p
+    ),
+  };
+}
+
 export interface PresetGroupBucket {
   /** undefined 表示未分组 */
   group: string | undefined;

@@ -15,6 +15,7 @@ import {
   recordPresetApplied,
   removePreset,
   removePresetsForProject,
+  renamePresetGroup,
   restorePreset,
   restoreProjectPresets,
   updatePreset,
@@ -95,6 +96,44 @@ describe("presets", () => {
     expect(buckets.map((b) => b.group)).toEqual(["客户", "测试", undefined]);
     expect(buckets[0]?.presets.map((p) => p.name)).toEqual(["客户-小李", "客户-老王"]);
     expect(buckets[2]?.presets.map((p) => p.name)).toEqual(["a-临时", "z-临时"]);
+  });
+
+  it("rename / dissolve a group touches only this project's presets in that group", () => {
+    let file = createEmptyPresetsFile();
+    for (const [projectId, name, group] of [
+      ["p1", "a", "客户"],
+      ["p1", "b", "客户"],
+      ["p1", "c", "测试"],
+      ["p1", "d", undefined],
+      ["p2", "e", "客户"],
+    ] as const) {
+      file = addPreset(file, { projectId, name, content: "", group }, NOW).file;
+    }
+
+    const later = new Date("2026-09-11T00:00:00.000Z");
+    const renamed = renamePresetGroup(file, "p1", "客户", " 客户-华南 ", later);
+    const groupOf = (f: typeof file, name: string) => f.presets.find((p) => p.name === name)?.group;
+    expect(groupOf(renamed, "a")).toBe("客户-华南");
+    expect(groupOf(renamed, "b")).toBe("客户-华南");
+    expect(groupOf(renamed, "c")).toBe("测试");
+    expect(groupOf(renamed, "d")).toBeUndefined();
+    // 别的项目里同名的组只是碰巧同名,不动
+    expect(groupOf(renamed, "e")).toBe("客户");
+    expect(renamed.presets.find((p) => p.name === "a")?.updatedAt).toBe(later.toISOString());
+    expect(renamed.presets.find((p) => p.name === "c")?.updatedAt).toBe(NOW.toISOString());
+    expect(listPresetGroups(renamed, "p1")).toEqual(["客户-华南", "测试"]);
+
+    // 改成已有的组名 = 合并
+    const merged = renamePresetGroup(file, "p1", "客户", "测试");
+    expect(listPresetGroups(merged, "p1")).toEqual(["测试"]);
+
+    // 空名字 = 解散
+    const dissolved = renamePresetGroup(file, "p1", "客户", "  ");
+    expect(groupOf(dissolved, "a")).toBeUndefined();
+    expect(listPresetGroups(dissolved, "p1")).toEqual(["测试"]);
+
+    // 改成一样的名字什么都不发生
+    expect(renamePresetGroup(file, "p1", "客户", "客户")).toBe(file);
   });
 
   it("matching and drift", () => {
