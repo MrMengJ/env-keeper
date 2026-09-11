@@ -6,6 +6,7 @@ import {
   parseRegistry,
   relocateProject,
   removeProject,
+  renameProjectSecret,
   setEnvrcNoticeDismissed,
   sortProjectsByRecent,
   toggleProjectSecret,
@@ -165,5 +166,15 @@ describe("registry", () => {
     reg = toggleProjectSecret(reg, id, "PORT");
     expect(isSecretKey("PORT", secrets())).toBe(false);
     expect(secrets()).toEqual([]);
+  });
+
+  it("renameProjectSecret: 改名后名单里的 KEY / !KEY 跟着改", () => {
+    let reg = addProject(createEmptyRegistry(), { name: "p", path: "/p" }).registry;
+    const id = reg.projects[0]!.id;
+    reg = toggleProjectSecret(reg, id, "PORT"); // PORT
+    reg = toggleProjectSecret(reg, id, "PUBLIC_KEY"); // !PUBLIC_KEY
+    reg = renameProjectSecret(reg, id, "PORT", "HTTP_PORT");
+    reg = renameProjectSecret(reg, id, "PUBLIC_KEY", "PUB_KEY");
+    expect(reg.projects[0]!.customSecrets).toEqual(["HTTP_PORT", "!PUB_KEY"]);
   });
 });

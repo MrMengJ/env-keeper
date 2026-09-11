@@ -19,6 +19,7 @@ import {
   sameShellSnippet,
   toggleShellSnippet,
   updateShellSnippet,
+  type ShellConfig,
   type ShellSnippet,
 } from "./shellTrack.js";
 import { ConfigFileError } from "./configFile.js";
@@ -331,5 +332,51 @@ describe("shellTrack", () => {
     expect(sameShellSnippet(base, { ...base, containsSecret: true })).toBe(false);
     expect(sameShellSnippet(undefined, undefined)).toBe(true);
     expect(sameShellSnippet(base, undefined)).toBe(false);
+  });
+
+  it("moveShellSnippet: 只跟同组的邻居换位,不会跑到别的组", () => {
+    const mk = (id: string, group?: string): ShellSnippet => ({ id, name: id, type: "export", content: `export ${id}=1`, enabled: true, group });
+    const cfg: ShellConfig = { version: 1, snippets: [mk("a", "J"), mk("x"), mk("b", "J"), mk("y")] };
+    // b 上移:跳过不同组的 x,跟 a 换
+    expect(moveShellSnippet(cfg, "b", "up").snippets.map((s) => s.id)).toEqual(["b", "x", "a", "y"]);
+    // a 上移:同组里已经是第一条,不动
+    expect(moveShellSnippet(cfg, "a", "up")).toBe(cfg);
+    // 未分组的 x 下移:跟同为未分组的 y 换
+    expect(moveShellSnippet(cfg, "x", "down").snippets.map((s) => s.id)).toEqual(["a", "y", "b", "x"]);
+  });
+
+  it("extractShellAssignments: 一行多个、临时前缀、函数体、注释行", () => {
+    expect(extractShellAssignments("export A=1 B=\"two words\"")).toEqual([
+      { key: "A", value: "1" },
+      { key: "B", value: "two words" },
+    ]);
+    // 赋值后面跟着命令:那是给这条命令的临时变量,不算
+    expect(extractShellAssignments("A=1 mycmd --flag")).toEqual([]);
+    expect(extractShellAssignments("A=1 B=2")).toEqual([
+      { key: "A", value: "1" },
+      { key: "B", value: "2" },
+    ]);
+    // 函数体里的是局部的
+    expect(extractShellAssignments("mkcd() {\n  TMP=$1\n  export INNER=1\n}\nexport OUTER=2")).toEqual([
+      { key: "OUTER", value: "2" },
+    ]);
+    expect(extractShellAssignments("function f {\n  X=1\n}\nY=2")).toEqual([{ key: "Y", value: "2" }]);
+    expect(extractShellAssignments("# export A=1\nexport B=2 # note")).toEqual([{ key: "B", value: "2" }]);
+  });
+
+  it("findShellConflicts: 一行多个赋值、alias -g、函数体里的不算", () => {
+    const mk = (id: string, content: string): ShellSnippet => ({ id, name: id, type: "snippet", content, enabled: true });
+    const conflicts = findShellConflicts([
+      mk("s1", "export A=1 B=2\nalias -g ll='ls -l'\nf() { TMP=1; }"),
+      mk("s2", "export B=3\nalias ll='ls -al'\ng() { TMP=2; }"),
+    ]);
+    expect(conflicts.map((c) => `${c.kind}:${c.name}`).sort()).toEqual(["alias:ll", "variable:B"]);
+  });
+
+  it("maskShellContent: 一行多个赋值只遮敏感的;注释掉的密钥也遮;带账号密码的地址按值遮", () => {
+    expect(maskShellContent("export PORT=3000 API_KEY=abc")).toBe("export PORT=3000 API_KEY=••••••••");
+    expect(maskShellContent("# export API_KEY=abc")).toBe("# export API_KEY=••••••••");
+    expect(maskShellContent("export DATABASE_URL=postgres://u:p@h/db")).toBe("export DATABASE_URL=••••••••");
+    expect(maskShellContent("export HOME_URL=https://example.com")).toBe("export HOME_URL=https://example.com");
   });
 });

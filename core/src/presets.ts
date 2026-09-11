@@ -65,8 +65,10 @@ export function parsePresetsFile(jsonStr: string): PresetsFile {
 
 /** 老版本升级到当前版本。目前只有 v1,留接缝同 migrateRegistry */
 export function migratePresetsFile(file: PresetsFile, fromVersion: number): PresetsFile {
-  if (fromVersion === CURRENT_PRESETS_VERSION) return file;
-  return file;
+  // 版本号不动的整理:同一项目下大小写不同的组名合并(2026-09-11 起组名不区分大小写)
+  const unified = unifyGroupCase(file);
+  if (fromVersion === CURRENT_PRESETS_VERSION) return unified;
+  return unified;
 }
 
 export function formatPresetsFile(file: PresetsFile): string {
@@ -82,6 +84,37 @@ export function appliedStateKey(projectId: string, envFilename: string): string 
 function normalizeGroup(group: string | undefined): string | undefined {
   const trimmed = group?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+/**
+ * 大小写不同视为同一个组:`Java` 和 `java` 不该分裂成两个。
+ * 已有的拼法优先——用户打了 `java` 而项目里已有 `Java`,就归到 `Java` 里
+ */
+function canonicalGroup(file: PresetsFile, projectId: string, group: string | undefined): string | undefined {
+  const normalized = normalizeGroup(group);
+  if (!normalized) return undefined;
+  const lower = normalized.toLowerCase();
+  const existing = file.presets.find((p) => p.projectId === projectId && p.group?.toLowerCase() === lower);
+  return existing?.group ?? normalized;
+}
+
+/** 老数据里同一项目下大小写不同的组名合并成先出现的那个拼法 */
+function unifyGroupCase(file: PresetsFile): PresetsFile {
+  const seen = new Map<string, string>();
+  let changed = false;
+  const presets = file.presets.map((p) => {
+    if (!p.group) return p;
+    const key = `${p.projectId}\u0000${p.group.toLowerCase()}`;
+    const canonical = seen.get(key);
+    if (canonical === undefined) {
+      seen.set(key, p.group);
+      return p;
+    }
+    if (canonical === p.group) return p;
+    changed = true;
+    return { ...p, group: canonical };
+  });
+  return changed ? { ...file, presets } : file;
 }
 
 function normalizeNote(note: string | undefined): string | undefined {
@@ -108,7 +141,7 @@ export function addPreset(
     projectId: input.projectId,
     name: input.name.trim(),
     note: normalizeNote(input.note),
-    group: normalizeGroup(input.group),
+    group: canonicalGroup(file, input.projectId, input.group),
     content: input.content,
     createdAt: iso,
     updatedAt: iso,
@@ -127,7 +160,7 @@ export function updatePreset(file: PresetsFile, id: string, updates: PresetUpdat
       if (updates.name !== undefined) next.name = updates.name.trim();
       if (updates.content !== undefined) next.content = updates.content;
       if ("note" in updates) next.note = normalizeNote(updates.note);
-      if ("group" in updates) next.group = normalizeGroup(updates.group);
+      if ("group" in updates) next.group = canonicalGroup(file, p.projectId, updates.group);
       return next;
     }),
   };
@@ -176,17 +209,14 @@ export function renamePresetGroup(
   file: PresetsFile,
   projectId: string,
   from: string,
-  to: string | undefined,
-  now: Date = new Date()
+  to: string | undefined
 ): PresetsFile {
-  const target = normalizeGroup(to);
+  // 撞上已有的组(不分大小写)就并进去,沿用那边的拼法;改组名不算"改了方案",不刷 updatedAt
+  const target = canonicalGroup(file, projectId, to);
   if (target === from) return file;
-  const iso = now.toISOString();
   return {
     ...file,
-    presets: file.presets.map((p) =>
-      p.projectId === projectId && p.group === from ? { ...p, group: target, updatedAt: iso } : p
-    ),
+    presets: file.presets.map((p) => (p.projectId === projectId && p.group === from ? { ...p, group: target } : p)),
   };
 }
 
@@ -280,12 +310,25 @@ export function detectPresetDrift(
  * 只动这一份——方案之间没有依赖(每份都是独立完整的 .env 内容),
  * 不像 Shell 片段那样有"单独回滚会凑出不存在的组合"的问题
  */
-export function restorePreset(file: PresetsFile, snapshot: Preset, now: Date = new Date()): PresetsFile {
+export function restorePreset(
+  file: PresetsFile,
+  snapshot: Preset,
+  now: Date = new Date(),
+  snapshotFile?: PresetsFile
+): PresetsFile {
   const restored: Preset = { ...snapshot, updatedAt: now.toISOString() };
   const exists = file.presets.some((p) => p.id === snapshot.id);
+  // 那一版里"某个文件上次套用的就是它"的记录一并带回来,否则恢复之后漂移提示对不上
+  const appliedState = { ...file.appliedState };
+  if (snapshotFile) {
+    for (const [key, state] of Object.entries(snapshotFile.appliedState)) {
+      if (state.presetId === snapshot.id && key.startsWith(`${snapshot.projectId}:`)) appliedState[key] = state;
+    }
+  }
   return {
     ...file,
     presets: exists ? file.presets.map((p) => (p.id === snapshot.id ? restored : p)) : [...file.presets, restored],
+    appliedState,
   };
 }
 

@@ -341,4 +341,20 @@ describe("envOps", () => {
     expect(isSecretKey("PUBLIC_KEY", ["!public_key"])).toBe(false);
     expect(isSecretKey("PORT", ["PORT"])).toBe(true);
   });
+
+  it("isSecretKey: 扩充的关键词 + 按值识别带账号密码的地址", () => {
+    for (const k of ["BASIC_AUTH", "SENTRY_DSN", "SSH_PRIVATE", "JWT_SIGNING", "PASSWORD_SALT", "TLS_CERT"]) {
+      expect(isSecretKey(k)).toBe(true);
+    }
+    expect(isSecretKey("DATABASE_URL")).toBe(false);
+    expect(isSecretKey("DATABASE_URL", undefined, "postgres://user:pass@db.local:5432/app")).toBe(true);
+    expect(isSecretKey("DATABASE_URL", undefined, "postgres://db.local:5432/app")).toBe(false);
+    // 用户说不是,连按值也不打码
+    expect(isSecretKey("DATABASE_URL", ["!DATABASE_URL"], "postgres://user:pass@h/app")).toBe(false);
+  });
+
+  it("diffEnvVariables: 只改行内注释也算改动", () => {
+    const diff = diffEnvVariables(parseEnv("A=1 # old\n"), parseEnv("A=1 # new\n"));
+    expect(diff[0]).toMatchObject({ key: "A", type: "changed", baseComment: "old", targetComment: "new" });
+  });
 });

@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import type { EnvLine, EnvQuote } from "./parseEnv.js";
 
-const DEFAULT_SECRET_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)/i;
+const DEFAULT_SECRET_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|DSN|PRIVATE|JWT|SALT|SIGNATURE|CERT)/i;
+
+/** 值本身长得像带账号密码的连接串:`postgres://user:pass@host/db`。`DATABASE_URL` 这类名字不带敏感词,只能看值 */
+const CREDENTIAL_URL_RE = /:\/\/[^/\s:@]+:[^/\s@]+@/;
+
+/** 值里带账号密码(URL 凭据)。名字判不出来时的补充,不看名字 */
+export function isSecretValue(value: string | undefined): boolean {
+  return typeof value === "string" && CREDENTIAL_URL_RE.test(value);
+}
 
 export interface EnvVariableOptions {
   quote?: EnvQuote | null;
@@ -290,16 +298,16 @@ export function mergeExampleEnv(existingExampleLines: EnvLine[], envLines: EnvLi
 export const SECRET_IGNORE_PREFIX = "!";
 
 /**
- * 判断是否为敏感字段。优先级:用户说不是 > 用户说是 > 内置规则
- * (KEY, TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL)。名单按项目存,不跨项目
+ * 判断是否为敏感字段。优先级:用户说不是 > 用户说是 > 内置规则(按名字的关键词)> 按值(URL 里带账号密码)。
+ * 名单按项目存,不跨项目。误判方向刻意偏向"多打码":`MONKEY` 命中 KEY 会被打码,用户可以按项目取消
  */
-export function isSecretKey(key: string, customSecrets?: string[]): boolean {
+export function isSecretKey(key: string, customSecrets?: string[], value?: string): boolean {
   const lower = key.toLowerCase();
   if (customSecrets) {
     if (customSecrets.some((s) => s.toLowerCase() === `${SECRET_IGNORE_PREFIX}${lower}`)) return false;
     if (customSecrets.some((s) => s.toLowerCase() === lower)) return true;
   }
-  return DEFAULT_SECRET_PATTERN.test(key);
+  return DEFAULT_SECRET_PATTERN.test(key) || isSecretValue(value);
 }
 
 /**
@@ -339,6 +347,9 @@ export interface EnvDiffEntry {
   baseDisabled?: boolean;
   /** 新版本中该变量是否被注释禁用;该版本里没有这个变量时为 undefined */
   targetDisabled?: boolean;
+  /** 两版的行内注释;只改了注释也算改动,界面上要能看出改的是注释 */
+  baseComment?: string;
+  targetComment?: string;
 }
 
 /**
@@ -346,10 +357,10 @@ export interface EnvDiffEntry {
  * base = 旧版本, target = 新版本;returns 按 added/removed/changed/unchanged 排序、同类型内按 key 排序
  */
 export function diffEnvVariables(baseLines: EnvLine[], targetLines: EnvLine[]): EnvDiffEntry[] {
-  const collect = (lines: EnvLine[]): Map<string, { value: string; disabled: boolean }> => {
-    const map = new Map<string, { value: string; disabled: boolean }>();
+  const collect = (lines: EnvLine[]): Map<string, { value: string; disabled: boolean; comment?: string }> => {
+    const map = new Map<string, { value: string; disabled: boolean; comment?: string }>();
     for (const l of lines) {
-      if (l.type === "kv") map.set(l.key, { value: l.value, disabled: l.disabled });
+      if (l.type === "kv") map.set(l.key, { value: l.value, disabled: l.disabled, comment: l.comment });
     }
     return map;
   };
@@ -365,13 +376,22 @@ export function diffEnvVariables(baseLines: EnvLine[], targetLines: EnvLine[]): 
     const target = targetMap.get(key);
 
     if (base && !target) {
-      result.push({ key, type: "removed", baseValue: base.value, baseDisabled: base.disabled });
+      result.push({ key, type: "removed", baseValue: base.value, baseDisabled: base.disabled, baseComment: base.comment });
     } else if (!base && target) {
-      result.push({ key, type: "added", targetValue: target.value, targetDisabled: target.disabled });
+      result.push({
+        key,
+        type: "added",
+        targetValue: target.value,
+        targetDisabled: target.disabled,
+        targetComment: target.comment,
+      });
     } else if (base && target) {
       // 值没变但启用状态变了也算改动:注释掉一个变量对运行结果的影响跟删掉它一样大,
-      // 只比值的话这种改动在差异里会完全消失
-      const same = base.value === target.value && base.disabled === target.disabled;
+      // 只比值的话这种改动在差异里会完全消失。行内注释同理——那是用户写给自己看的说明
+      const same =
+        base.value === target.value &&
+        base.disabled === target.disabled &&
+        (base.comment ?? "") === (target.comment ?? "");
       result.push({
         key,
         type: same ? "unchanged" : "changed",
@@ -379,6 +399,8 @@ export function diffEnvVariables(baseLines: EnvLine[], targetLines: EnvLine[]): 
         targetValue: target.value,
         baseDisabled: base.disabled,
         targetDisabled: target.disabled,
+        baseComment: base.comment,
+        targetComment: target.comment,
       });
     }
   }

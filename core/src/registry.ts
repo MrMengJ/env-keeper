@@ -124,6 +124,16 @@ export function addProject(
   };
 }
 
+/** 改显示名。只动注册表里的名字,磁盘上的文件夹一个字都不碰;快照按 id 存,改名不影响历史 */
+export function renameProject(registry: RegistryData, id: string, name: string): RegistryData {
+  const trimmed = name.trim();
+  if (!trimmed) return registry;
+  return {
+    ...registry,
+    projects: registry.projects.map((p) => (p.id === id ? { ...p, name: trimmed } : p)),
+  };
+}
+
 export function removeProject(registry: RegistryData, projectId: string): RegistryData {
   return {
     ...registry,
@@ -165,6 +175,27 @@ export function toggleProjectSecret(registry: RegistryData, projectId: string, k
         nextSecrets = isIgnored ? secrets.filter((s) => s.toLowerCase() !== ignored) : [...secrets, key];
       }
       return { ...p, customSecrets: nextSecrets };
+    }),
+  };
+}
+
+/**
+ * 变量改名后,名单里关于旧名字的判断(`KEY` / `!KEY`)跟着改到新名字上。
+ * 不改的话旧名字留在名单里变成死条目,新名字又回到内置规则,用户标过的判断就丢了
+ */
+export function renameProjectSecret(registry: RegistryData, projectId: string, from: string, to: string): RegistryData {
+  const fromLower = from.toLowerCase();
+  return {
+    ...registry,
+    projects: registry.projects.map((p) => {
+      if (p.id !== projectId || !p.customSecrets?.length) return p;
+      const customSecrets = p.customSecrets.map((s) => {
+        const lower = s.toLowerCase();
+        if (lower === fromLower) return to;
+        if (lower === `${SECRET_IGNORE_PREFIX}${fromLower}`) return `${SECRET_IGNORE_PREFIX}${to}`;
+        return s;
+      });
+      return { ...p, customSecrets };
     }),
   };
 }

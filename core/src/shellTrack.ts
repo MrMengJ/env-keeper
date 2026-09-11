@@ -58,8 +58,10 @@ export function parseShellConfig(jsonStr: string): ShellConfig {
 
 /** 老版本数据升级到当前版本。目前只有 v1,留接缝同 migrateRegistry */
 export function migrateShellConfig(config: ShellConfig, fromVersion: number): ShellConfig {
-  if (fromVersion === CURRENT_SHELL_CONFIG_VERSION) return config;
-  return config;
+  // 版本号不动的整理:大小写不同的组名合并(2026-09-11 起组名不区分大小写)
+  const unified = unifyGroupCase(config);
+  if (fromVersion === CURRENT_SHELL_CONFIG_VERSION) return unified;
+  return unified;
 }
 
 export function formatShellConfig(config: ShellConfig): string {
@@ -72,6 +74,32 @@ function normalizeGroup(group: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+/** 大小写不同视为同一个组,已有的拼法优先(同方案的 canonicalGroup) */
+function canonicalShellGroup(config: ShellConfig, group: string | undefined): string | undefined {
+  const normalized = normalizeGroup(group);
+  if (!normalized) return undefined;
+  const lower = normalized.toLowerCase();
+  return config.snippets.find((s) => s.group?.toLowerCase() === lower)?.group ?? normalized;
+}
+
+/** 老数据里大小写不同的组名合并成先出现的那个拼法 */
+function unifyGroupCase(config: ShellConfig): ShellConfig {
+  const seen = new Map<string, string>();
+  let changed = false;
+  const snippets = config.snippets.map((s) => {
+    if (!s.group) return s;
+    const canonical = seen.get(s.group.toLowerCase());
+    if (canonical === undefined) {
+      seen.set(s.group.toLowerCase(), s.group);
+      return s;
+    }
+    if (canonical === s.group) return s;
+    changed = true;
+    return { ...s, group: canonical };
+  });
+  return changed ? { ...config, snippets } : config;
+}
+
 export function addShellSnippet(
   config: ShellConfig,
   snippet: Omit<ShellSnippet, "id">
@@ -79,7 +107,7 @@ export function addShellSnippet(
   const id = `sh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const newSnippet: ShellSnippet = {
     ...snippet,
-    group: normalizeGroup(snippet.group),
+    group: canonicalShellGroup(config, snippet.group),
     id,
   };
   return {
@@ -101,7 +129,7 @@ export function updateShellSnippet(
     snippets: config.snippets.map((s) => {
       if (s.id !== id) return s;
       const next = { ...s, ...updates };
-      if ("group" in updates) next.group = normalizeGroup(updates.group);
+      if ("group" in updates) next.group = canonicalShellGroup(config, updates.group);
       return next;
     }),
   };
@@ -151,7 +179,7 @@ export function groupShellSnippets(snippets: ShellSnippet[]): ShellGroupBucket[]
  * 新名字撞上已有的组等于合并,由界面在调用前确认
  */
 export function renameShellGroup(config: ShellConfig, from: string, to: string | undefined): ShellConfig {
-  const target = normalizeGroup(to);
+  const target = canonicalShellGroup(config, to);
   if (target === from) return config;
   return {
     ...config,
@@ -219,11 +247,9 @@ export function matchesDeclaredType(type: ShellSnippetType, content: string): bo
  * 已经在最前/最后时原样返回配置,由调用方决定要不要提示。
  */
 export function moveShellSnippet(config: ShellConfig, id: string, direction: "up" | "down"): ShellConfig {
+  const targetIndex = adjacentInGroupIndex(config.snippets, id, direction);
   const index = config.snippets.findIndex((s) => s.id === id);
-  if (index < 0) return config;
-
-  const targetIndex = direction === "up" ? index - 1 : index + 1;
-  if (targetIndex < 0 || targetIndex >= config.snippets.length) return config;
+  if (index < 0 || targetIndex < 0) return config;
 
   const snippets = [...config.snippets];
   const moved = snippets[index];
@@ -233,6 +259,22 @@ export function moveShellSnippet(config: ShellConfig, id: string, direction: "up
   snippets[index] = displaced;
   snippets[targetIndex] = moved;
   return { ...config, snippets };
+}
+
+/**
+ * 同一组里、生成顺序上的前一条 / 后一条的下标;没有返回 -1。
+ * 列表是按分组分区显示的,移动只跟同组的邻居换位:此前跟数组里的邻居换,邻居可能在别的组,
+ * 片段会从眼前的分区消失、跑到另一个分区去。未分组的片段在未分组的范围内换
+ */
+export function adjacentInGroupIndex(snippets: ShellSnippet[], id: string, direction: "up" | "down"): number {
+  const index = snippets.findIndex((s) => s.id === id);
+  if (index < 0) return -1;
+  const group = snippets[index]?.group ?? undefined;
+  const step = direction === "up" ? -1 : 1;
+  for (let i = index + step; i >= 0 && i < snippets.length; i += step) {
+    if ((snippets[i]?.group ?? undefined) === group) return i;
+  }
+  return -1;
 }
 
 export type ShellSnippetDiffType = "added" | "removed" | "changed" | "unchanged";
@@ -302,8 +344,8 @@ export function diffShellSnippets(base: ShellSnippet[], target: ShellSnippet[]):
   return result.sort((a, b) => order[a.type] - order[b.type] || a.name.localeCompare(b.name));
 }
 
-/** 一行里"KEY=值"形态的赋值,可选带 export 前缀 */
-const SHELL_ASSIGNMENT_RE = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/;
+/** 一个 `KEY=值` 词:值可以是引号包住的一段,也可以是不含空白的一串 */
+const ASSIGNMENT_TOKEN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=("(?:[^"\\]|\\.)*"|'[^']*'|[^\s"']*)/;
 
 export interface ShellAssignment {
   key: string;
@@ -311,30 +353,92 @@ export interface ShellAssignment {
   value: string;
 }
 
+interface ShellAssignmentToken extends ShellAssignment {
+  /** 值在这一行里的起止位置(含引号),打码时替换用 */
+  valueStart: number;
+  valueEnd: number;
+}
+
 /**
- * 从片段内容里抽出 `KEY=值` / `export KEY=值` 形态的赋值。
- * 给全局搜索用:Shell 轨里存的同样是环境变量,用户搜 JAVA_HOME 却搜不到会当成 bug。
- * 认不出的行直接跳过——这里宁可少给结果,也不要把命令行参数误当成变量。
+ * 认出一行里的全局赋值(可多个:`export A=1 B=2`)。规则按 shell 的实际语义:
+ * - `export A=1 B=2` / `A=1 B=2`(整行都是赋值)→ 全部算
+ * - `A=1 mycmd`(赋值后面跟着命令)→ 那是给这一条命令的临时变量,不算
+ * - 认不出的行返回 null
+ */
+function parseAssignmentLine(line: string): ShellAssignmentToken[] | null {
+  let pos = 0;
+  const skipSpaces = () => {
+    while (pos < line.length && /\s/.test(line[pos]!)) pos++;
+  };
+  skipSpaces();
+  const exportMatch = /^export\s+/.exec(line.slice(pos));
+  const exported = exportMatch !== null;
+  if (exportMatch) pos += exportMatch[0].length;
+
+  const tokens: ShellAssignmentToken[] = [];
+  while (pos < line.length) {
+    skipSpaces();
+    if (pos >= line.length) break;
+    if (line[pos] === "#") break; // 行尾注释
+    const m = ASSIGNMENT_TOKEN_RE.exec(line.slice(pos));
+    if (!m) return exported ? tokens : null; // 非赋值的词:不带 export 时整行是"临时变量 + 命令",不算
+    const rawValue = m[2] ?? "";
+    let value = rawValue;
+    const first = value[0];
+    if ((first === '"' || first === "'") && value.endsWith(first) && value.length >= 2) value = value.slice(1, -1);
+    const keyLen = (m[1] ?? "").length + 1;
+    tokens.push({
+      key: m[1]!,
+      value,
+      valueStart: pos + keyLen,
+      valueEnd: pos + keyLen + rawValue.length,
+    });
+    pos += m[0].length;
+  }
+  return tokens.length > 0 ? tokens : null;
+}
+
+/** 函数定义的起始行:`name() {`、`function name {`、`function name() {` */
+const FUNCTION_START_RE = /^\s*(?:function\s+[\w-]+\s*(?:\(\s*\))?|[\w-]+\s*\(\s*\))\s*\{/;
+
+/**
+ * 逐行遍历,跳过函数体:函数里的赋值是局部的(或只在调用时发生),不算"设了全局变量"。
+ * 靠数花括号找函数结尾——够用,不做完整的 shell 解析
+ */
+function forEachTopLevelLine(content: string, visit: (line: string) => void): void {
+  let depth = 0;
+  for (const line of content.split("\n")) {
+    if (depth === 0 && FUNCTION_START_RE.test(line)) {
+      depth = 1;
+      depth += (line.match(/\{/g)?.length ?? 1) - 1 - (line.match(/\}/g)?.length ?? 0);
+      if (depth <= 0) depth = 0;
+      continue;
+    }
+    if (depth > 0) {
+      depth += (line.match(/\{/g)?.length ?? 0) - (line.match(/\}/g)?.length ?? 0);
+      if (depth < 0) depth = 0;
+      continue;
+    }
+    visit(line);
+  }
+}
+
+/**
+ * 从片段内容里抽出全局的 `KEY=值` / `export KEY=值` 赋值(一行多个也认,函数体内的不算)。
+ * 给全局搜索和重复设置检查用:宁可少给结果,也不要把命令行参数误当成变量
  */
 export function extractShellAssignments(content: string): ShellAssignment[] {
   const result: ShellAssignment[] = [];
-  for (const line of content.split("\n")) {
+  forEachTopLevelLine(content, (line) => {
     // 被注释掉的行不算:它在 shell 里本来就不生效
-    if (line.trim().startsWith("#")) continue;
-    const match = SHELL_ASSIGNMENT_RE.exec(line);
-    if (!match) continue;
-    const key = match[2];
-    let value = match[4] ?? "";
-    const first = value[0];
-    if ((first === '"' || first === "'") && value.endsWith(first) && value.length >= 2) {
-      value = value.slice(1, -1);
-    }
-    if (key) result.push({ key, value });
-  }
+    if (line.trim().startsWith("#")) return;
+    for (const { key, value } of parseAssignmentLine(line) ?? []) result.push({ key, value });
+  });
   return result;
 }
 
-const SHELL_ALIAS_RE = /^\s*alias\s+([^\s=]+)=/;
+/** `alias name=`,允许中间带 `-g` 这类选项 */
+const SHELL_ALIAS_RE = /^\s*alias\s+(?:-\w+\s+)*([^\s=-][^\s=]*)=/;
 
 export interface ShellConflict {
   kind: "variable" | "alias";
@@ -370,10 +474,10 @@ export function findShellConflicts(snippets: ShellSnippet[]): ShellConflict[] {
       if (value.includes(`$${key}`) || value.includes(`\${${key}`)) continue;
       claim("variable", key, snippet);
     }
-    for (const line of snippet.content.split("\n")) {
+    forEachTopLevelLine(snippet.content, (line) => {
       const match = SHELL_ALIAS_RE.exec(line);
       if (match?.[1]) claim("alias", match[1], snippet);
-    }
+    });
   }
 
   const conflicts: ShellConflict[] = [];
@@ -404,15 +508,24 @@ export function maskShellContent(
   return content
     .split("\n")
     .map((line) => {
-      const match = SHELL_ASSIGNMENT_RE.exec(line);
-      if (!match) {
-        // 整段标记为敏感时,连认不出的行也一并遮住
-        return maskAll && line.trim() !== "" && !line.trim().startsWith("#") ? MASKED_VALUE : line;
+      const trimmed = line.trim();
+      // 注释掉的赋值也要打码:被注释掉的 API_KEY 仍然是密钥
+      const commented = trimmed.startsWith("#");
+      const body = commented ? line.replace(/^(\s*#\s?)/, "") : line;
+      const prefix = commented ? line.slice(0, line.length - body.length) : "";
+      const tokens = parseAssignmentLine(body);
+      if (!tokens) {
+        // 整段标记为敏感时,连认不出的行也一并遮住(注释行除外,那是说明文字)
+        return maskAll && trimmed !== "" && !commented ? MASKED_VALUE : line;
       }
-      const [, prefix, key, eq, value] = match;
-      if (value === undefined || value === "") return line;
-      if (!maskAll && !isSecretKey(key ?? "", customSecrets)) return line;
-      return `${prefix}${key}${eq}${MASKED_VALUE}`;
+      // 从后往前替换,前面的位置才不会漂
+      let out = body;
+      for (const tk of [...tokens].reverse()) {
+        if (tk.value === "") continue;
+        if (!maskAll && !isSecretKey(tk.key, customSecrets, tk.value)) continue;
+        out = `${out.slice(0, tk.valueStart)}${MASKED_VALUE}${out.slice(tk.valueEnd)}`;
+      }
+      return prefix + out;
     })
     .join("\n");
 }

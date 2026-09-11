@@ -110,8 +110,7 @@ describe("presets", () => {
       file = addPreset(file, { projectId, name, content: "", group }, NOW).file;
     }
 
-    const later = new Date("2026-09-11T00:00:00.000Z");
-    const renamed = renamePresetGroup(file, "p1", "客户", " 客户-华南 ", later);
+    const renamed = renamePresetGroup(file, "p1", "客户", " 客户-华南 ");
     const groupOf = (f: typeof file, name: string) => f.presets.find((p) => p.name === name)?.group;
     expect(groupOf(renamed, "a")).toBe("客户-华南");
     expect(groupOf(renamed, "b")).toBe("客户-华南");
@@ -119,7 +118,8 @@ describe("presets", () => {
     expect(groupOf(renamed, "d")).toBeUndefined();
     // 别的项目里同名的组只是碰巧同名,不动
     expect(groupOf(renamed, "e")).toBe("客户");
-    expect(renamed.presets.find((p) => p.name === "a")?.updatedAt).toBe(later.toISOString());
+    // 改组名不算改方案:updatedAt 不动,历史里不会看起来像人人都改了内容
+    expect(renamed.presets.find((p) => p.name === "a")?.updatedAt).toBe(NOW.toISOString());
     expect(renamed.presets.find((p) => p.name === "c")?.updatedAt).toBe(NOW.toISOString());
     expect(listPresetGroups(renamed, "p1")).toEqual(["客户-华南", "测试"]);
 
@@ -224,5 +224,40 @@ describe("restoreProjectPresets", () => {
     expect(listPresetsForProject(restored, "p2").map((p) => p.name)).toEqual(["b1", "b2"]);
     expect(getAppliedPreset(restored, "p1", ".env")?.id).toBe(a1.preset.id);
     expect(getAppliedPreset(restored, "p2", ".env")?.id).toBe(b1.preset.id);
+  });
+
+  it("分组名不区分大小写:新方案归到已有拼法,老数据合并,改名撞上就并入", () => {
+    let file = createEmptyPresetsFile();
+    file = addPreset(file, { projectId: "p1", name: "a", content: "", group: "Java" }, NOW).file;
+    file = addPreset(file, { projectId: "p1", name: "b", content: "", group: "java" }, NOW).file;
+    expect(file.presets.map((p) => p.group)).toEqual(["Java", "Java"]);
+    // 改分组同样归一
+    file = addPreset(file, { projectId: "p1", name: "c", content: "", group: "Ops" }, NOW).file;
+    const cId = file.presets[2]!.id;
+    expect(updatePreset(file, cId, { group: "JAVA" }).presets[2]!.group).toBe("Java");
+    // 老数据里已经分裂的,读取时合并
+    const raw = JSON.stringify({
+      version: 1,
+      presets: [
+        { id: "1", projectId: "p1", name: "x", content: "", group: "Java", createdAt: "", updatedAt: "" },
+        { id: "2", projectId: "p1", name: "y", content: "", group: "JAVA", createdAt: "", updatedAt: "" },
+        { id: "3", projectId: "p2", name: "z", content: "", group: "java", createdAt: "", updatedAt: "" },
+      ],
+      appliedState: {},
+    });
+    expect(parsePresetsFile(raw).presets.map((p) => p.group)).toEqual(["Java", "Java", "java"]);
+    // 改组名撞上已有的(不分大小写)就并入,沿用那边的拼法
+    expect(renamePresetGroup(file, "p1", "Ops", "JAVA").presets.map((p) => p.group)).toEqual(["Java", "Java", "Java"]);
+  });
+
+  it("restorePreset: 带上那一版里指向它的套用记录", () => {
+    let file = createEmptyPresetsFile();
+    const { file: f1, preset } = addPreset(file, { projectId: "p1", name: "a", content: "A=1", group: undefined }, NOW);
+    const snapshotFile = recordPresetApplied(f1, "p1", ".env", preset.id, NOW);
+    file = removePreset(snapshotFile, preset.id);
+    expect(file.appliedState).toEqual({});
+    const restored = restorePreset(file, preset, NOW, snapshotFile);
+    expect(restored.presets.map((p) => p.id)).toEqual([preset.id]);
+    expect(restored.appliedState["p1:.env"]?.presetId).toBe(preset.id);
   });
 });
