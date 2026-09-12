@@ -1,7 +1,7 @@
 {
   "name": "@env-butler/core",
   "version": "0.0.1",
-  "description": "Pure logic for Env Butler: parse/generate .env files, snapshots, conflict detection.",
+  "description": "Pure logic for Env Keeper: parse/generate .env files, snapshots, conflict detection.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
