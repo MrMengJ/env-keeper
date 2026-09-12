@@ -344,12 +344,17 @@ export function diffShellSnippets(base: ShellSnippet[], target: ShellSnippet[]):
   return result.sort((a, b) => order[a.type] - order[b.type] || a.name.localeCompare(b.name));
 }
 
-/** 一个 `KEY=值` 词:值可以是引号包住的一段,也可以是不含空白的一串 */
-const ASSIGNMENT_TOKEN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=("(?:[^"\\]|\\.)*"|'[^']*'|[^\s"']*)/;
+/**
+ * 一个 `KEY=值` 词:值可以是引号包住的一段,也可以是不含空白的一串。
+ * 引号开了没关(值跨行,如 `KEY="第一行` / 下一行 `第二行"`)也要认出来——
+ * 认不出来就等于"这行没有赋值",打码会整段放过(实测过:多行密钥原本完全不打码)
+ */
+const ASSIGNMENT_TOKEN_RE =
+  /^([A-Za-z_][A-Za-z0-9_]*)=("(?:[^"\\]|\\.)*"|'[^']*'|"[^"]*|'[^']*|[^\s"']*)/;
 
 export interface ShellAssignment {
   key: string;
-  /** 已去掉包裹引号的值 */
+  /** 已去掉包裹引号的值;跨行值时只有第一行的部分 */
   value: string;
 }
 
@@ -357,6 +362,8 @@ interface ShellAssignmentToken extends ShellAssignment {
   /** 值在这一行里的起止位置(含引号),打码时替换用 */
   valueStart: number;
   valueEnd: number;
+  /** 引号开了没关:值一直延伸到行尾,后面几行由打码逻辑接着遮 */
+  unterminated?: boolean;
 }
 
 /**
@@ -385,13 +392,16 @@ function parseAssignmentLine(line: string): ShellAssignmentToken[] | null {
     const rawValue = m[2] ?? "";
     let value = rawValue;
     const first = value[0];
-    if ((first === '"' || first === "'") && value.endsWith(first) && value.length >= 2) value = value.slice(1, -1);
+    const closed = (first === '"' || first === "'") && value.length >= 2 && value.endsWith(first);
+    if (closed) value = value.slice(1, -1);
+    const unterminated = (first === '"' || first === "'") && !closed;
     const keyLen = (m[1] ?? "").length + 1;
     tokens.push({
       key: m[1]!,
       value,
       valueStart: pos + keyLen,
       valueEnd: pos + keyLen + rawValue.length,
+      ...(unterminated ? { unterminated: true } : {}),
     });
     pos += m[0].length;
   }
@@ -504,33 +514,87 @@ export function maskShellContent(
   options: { customSecrets?: string[]; maskAll?: boolean } = {}
 ): string {
   const { customSecrets, maskAll = false } = options;
+  const out: string[] = [];
+  /** 上一行留了个没关上的引号:后面的行一直遮到它关上为止 */
+  let pendingQuote: string | null = null;
 
-  return content
-    .split("\n")
-    .map((line) => {
-      const trimmed = line.trim();
-      // 注释掉的赋值也要打码:被注释掉的 API_KEY 仍然是密钥
-      const commented = trimmed.startsWith("#");
-      const body = commented ? line.replace(/^(\s*#\s?)/, "") : line;
-      const prefix = commented ? line.slice(0, line.length - body.length) : "";
-      const tokens = parseAssignmentLine(body);
-      if (!tokens) {
-        // 整段标记为敏感时,连认不出的行也一并遮住(注释行除外,那是说明文字)
-        return maskAll && trimmed !== "" && !commented ? MASKED_VALUE : line;
+  for (const line of content.split("\n")) {
+    // 还在上一行的引号里:收尾引号连同它前面的内容一起遮掉,
+    // 引号之后剩下的部分(如 `; echo ok`)照常留着
+    if (pendingQuote) {
+      const closing = findQuoteIndex(line, pendingQuote);
+      if (closing < 0) {
+        out.push(MASKED_VALUE);
+        continue;
       }
-      // 从后往前替换,前面的位置才不会漂
-      let out = body;
-      for (const tk of [...tokens].reverse()) {
-        if (tk.value === "") continue;
-        if (!maskAll && !isSecretKey(tk.key, customSecrets, tk.value)) continue;
-        out = `${out.slice(0, tk.valueStart)}${MASKED_VALUE}${out.slice(tk.valueEnd)}`;
-      }
-      return prefix + out;
-    })
-    .join("\n");
+      pendingQuote = null;
+      out.push(`${MASKED_VALUE}${line.slice(closing + 1)}`);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    // 注释掉的赋值也要打码:被注释掉的 API_KEY 仍然是密钥
+    const commented = trimmed.startsWith("#");
+    const body = commented ? line.replace(/^(\s*#\s?)/, "") : line;
+    const prefix = commented ? line.slice(0, line.length - body.length) : "";
+    const tokens = parseAssignmentLine(body);
+    if (!tokens) {
+      // 整段标记为敏感时,连认不出的行也一并遮住(注释行除外,那是说明文字)
+      out.push(maskAll && trimmed !== "" && !commented ? MASKED_VALUE : line);
+      continue;
+    }
+    // 从后往前替换,前面的位置才不会漂
+    let masked = body;
+    for (const tk of [...tokens].reverse()) {
+      if (!maskAll && !isSecretKey(tk.key, customSecrets, tk.value)) continue;
+      if (tk.value === "" && !tk.unterminated) continue;
+      masked = `${masked.slice(0, tk.valueStart)}${MASKED_VALUE}${masked.slice(tk.valueEnd)}`;
+      // 引号开了没关:值一直延伸到行尾,后面的行接着遮
+      if (tk.unterminated) pendingQuote = tk.value[0] ?? null;
+    }
+    out.push(prefix + masked);
+  }
+
+  return out.join("\n");
 }
 
-export function generateShellScript(snippets: ShellSnippet[]): string {
+/** 在一行里找配对的收尾引号(反斜杠转义的不算);找不到返回 -1 */
+function findQuoteIndex(line: string, quote: string): number {
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (line[i] === quote) return i;
+  }
+  return -1;
+}
+
+/**
+ * 名字 / 分组 / 备注要拼进 shell.sh 的注释行,里面混进换行的话,
+ * 后半截会落到独立一行上——那一行不再是注释,而是一条每次开终端都会执行的命令。
+ * 界面上这几个字段都是单行输入框,正常敲不进去,但粘贴、手改 shell.json 都能绕过
+ */
+function oneLine(text: string): string {
+  return text.replace(/[\r\n]+/g, " ").trim();
+}
+
+/** shell.sh 里那行 `# [EXPORT] 名字 (分组) - 备注`。界面预览共用,免得两处各拼一份 */
+export function snippetCommentLine(item: ShellSnippet): string {
+  const group = item.group ? ` (${oneLine(item.group)})` : "";
+  const desc = item.description ? ` - ${oneLine(item.description)}` : "";
+  return `# [${item.type.toUpperCase()}] ${oneLine(item.name)}${group}${desc}`;
+}
+
+/**
+ * 生成 shell.sh 全文。
+ * options.transformContent 给预览页用:界面要按片段分别打码(勾了"整段敏感"的整段遮),
+ * 拼装逻辑仍只有这一份,预览与真实生成不会走岔
+ */
+export function generateShellScript(
+  snippets: ShellSnippet[],
+  options: { transformContent?: (snippet: ShellSnippet, content: string) => string } = {}
+): string {
   const activeSnippets = snippets.filter((s) => s.enabled && s.content.trim() !== "");
 
   const lines: string[] = [
@@ -544,10 +608,9 @@ export function generateShellScript(snippets: ShellSnippet[]): string {
   ];
 
   for (const item of activeSnippets) {
-    const group = item.group ? ` (${item.group})` : "";
-    const desc = item.description ? ` - ${item.description}` : "";
-    lines.push(`# [${item.type.toUpperCase()}] ${item.name}${group}${desc}`);
-    lines.push(item.content.trim());
+    const content = item.content.trim();
+    lines.push(snippetCommentLine(item));
+    lines.push(options.transformContent ? options.transformContent(item, content) : content);
     lines.push("");
   }
 

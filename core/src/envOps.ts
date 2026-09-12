@@ -6,9 +6,18 @@ const DEFAULT_SECRET_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUT
 /** 值本身长得像带账号密码的连接串:`postgres://user:pass@host/db`。`DATABASE_URL` 这类名字不带敏感词,只能看值 */
 const CREDENTIAL_URL_RE = /:\/\/[^/\s:@]+:[^/\s@]+@/;
 
-/** 值里带账号密码(URL 凭据)。名字判不出来时的补充,不看名字 */
+/**
+ * HTTP 头里那种"方案 + 凭证"的写法:`Bearer eyJhbGci…` / `Basic dXNlcjpwYXNz`。
+ * 要求凭证是一整串不含空白、至少 8 位的 token——光凭 `Basic` 这个词本身不算数,
+ * 否则 `PLAN=Basic plan` 这类普通值也会被打码
+ */
+const AUTH_SCHEME_RE = /^(Bearer|Basic|Digest)\s+[A-Za-z0-9._~+/=-]{8,}$/;
+
+/** 值里带账号密码或认证头(URL 凭据 / Bearer)。名字判不出来时的补充,不看名字 */
 export function isSecretValue(value: string | undefined): boolean {
-  return typeof value === "string" && CREDENTIAL_URL_RE.test(value);
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return CREDENTIAL_URL_RE.test(trimmed) || AUTH_SCHEME_RE.test(trimmed);
 }
 
 export interface EnvVariableOptions {
@@ -415,12 +424,26 @@ const ENV_FILENAME_RE = /^\.env(\.[A-Za-z0-9_-]+)*$/;
 /** 模板文件:形态像环境文件,但里面没有真实值,不当环境文件管理(生成 .env.example 有专门的动作) */
 export const ENV_TEMPLATE_FILENAMES: ReadonlySet<string> = new Set([".env.example", ".env.sample", ".env.template"]);
 
+/** 原子写临时文件名里的标记(storage 层拼名用):`.env.env-butler-tmp-1234` */
+export const ENV_TMP_MARKER = ".env-butler-tmp";
+
+/**
+ * 是不是原子写留下的临时文件。
+ * 临时文件名故意以 `.env` 开头,好让项目的 `.env*` 忽略规则挡住崩溃残片;
+ * 代价是它正好落在下面这套白名单里——不排掉的话,写盘那一瞬间的临时文件会出现在界面的下拉框里
+ */
+export function isEnvTempFilename(filename: string): boolean {
+  return filename.includes(ENV_TMP_MARKER);
+}
+
 /**
  * 这个文件名算不算"环境文件"。白名单而不是"以 .env 开头":
  * `.envrc` 是 direnv 的 shell 脚本(设计上绝不能碰)、`.env_副本` / `.environment` 也都不是
  */
 export function isEnvFilename(filename: string): boolean {
-  return ENV_FILENAME_RE.test(filename) && !ENV_TEMPLATE_FILENAMES.has(filename);
+  return (
+    !isEnvTempFilename(filename) && ENV_FILENAME_RE.test(filename) && !ENV_TEMPLATE_FILENAMES.has(filename)
+  );
 }
 
 /** 校验新建的环境文件名是否合法(同 isEnvFilename,允许前后空白) */

@@ -8,6 +8,7 @@ import {
   mergeExampleEnv,
   isEncryptedValue,
   isSecretKey,
+  isSecretValue,
   isEnvFilename,
   isValidEnvFilename,
   maskSecret,
@@ -89,6 +90,19 @@ describe("envOps", () => {
     // custom list
     expect(isSecretKey("CUSTOM_VAR", ["CUSTOM_VAR"])).toBe(true);
     expect(maskSecret("any_value")).toBe("••••••••");
+  });
+
+  it("isSecretValue: 连接串凭据与认证头按值识别,普通短语不算", () => {
+    // 值里带账号密码
+    expect(isSecretValue("postgres://user:pass@host/db")).toBe(true);
+    // Authorization 头那种"方案 + 凭证"
+    expect(isSecretValue("Bearer eyJhbGciOiJIUzI1NiJ9.abc.def")).toBe(true);
+    expect(isSecretValue("Basic dXNlcjpwYXNz")).toBe(true);
+    expect(isSecretValue("  Bearer abcdefghijklmnop  ")).toBe(true);
+    // 只有方案词、后面不是一长串凭证的不算,否则 PLAN=Basic plan 也会被打码
+    expect(isSecretValue("Basic plan")).toBe(false);
+    expect(isSecretValue("hello")).toBe(false);
+    expect(isSecretValue(undefined)).toBe(false);
   });
 
   it("isEncryptedValue: recognizes dotenvx prefix", () => {

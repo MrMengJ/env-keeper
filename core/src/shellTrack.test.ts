@@ -379,4 +379,20 @@ describe("shellTrack", () => {
     expect(maskShellContent("export DATABASE_URL=postgres://u:p@h/db")).toBe("export DATABASE_URL=••••••••");
     expect(maskShellContent("export HOME_URL=https://example.com")).toBe("export HOME_URL=https://example.com");
   });
+
+  it("maskShellContent: 引号跨行的值整段遮住(此前整段不打码)", () => {
+    // 引号开了没关的行,值捕获为空 → 此前被当成"这行没有值"整段放过
+    expect(maskShellContent('export API_KEY="first\nsecond"\necho done')).toBe(
+      "export API_KEY=••••••••\n••••••••\necho done"
+    );
+    expect(maskShellContent("export TOKEN='aaa\nbbb'\necho ok")).toBe("export TOKEN=••••••••\n••••••••\necho ok");
+    // 收尾引号后面还有命令:只遮到引号为止
+    expect(maskShellContent('export API_KEY="x\ny"; echo tail')).toBe("export API_KEY=••••••••\n••••••••; echo tail");
+    // 一直到文件尾都没关上:剩下的全部遮掉(宁可多遮)
+    expect(maskShellContent('export API_KEY="never-closed')).toBe("export API_KEY=••••••••");
+    // 名字不敏感就不遮,跨不跨行都一样
+    expect(maskShellContent('export GREETING="hello\nworld"')).toBe('export GREETING="hello\nworld"');
+    // 勾了"整段敏感"同样要认得出跨行
+    expect(maskShellContent('export WHATEVER="a\nb"', { maskAll: true })).toBe("export WHATEVER=••••••••\n••••••••");
+  });
 });
