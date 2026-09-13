@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+# 提交前跑一遍 core 的 check(typecheck + test + build),约 2 秒。
+#
+# 这个仓库的包在 core/ 子目录里,所以要指过去跑。
+#
+# 临时跳过(仅限确实必要时):git commit --no-verify
+
+if [ ! -d core/node_modules ]; then
+  echo "⚠️  core 没有 node_modules,跳过提交前检查。先在 core/ 里跑 pnpm install 再提交。"
+  exit 0
+fi
+
+echo "→ 提交前检查(typecheck + test + build)…"
+# 不能带 --silent:pnpm 会把它透传给脚本链里最后一条命令(tsc),tsc 不认这个参数
+if ! pnpm --dir core run check; then
+  echo ""
+  echo "❌ 检查没通过,提交已中止。"
+  exit 1
+fi

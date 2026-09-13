@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# build output (raycast 插件通过 file: 依赖读取,本地保留即可,不入库)
+dist/
+
+# test / tooling
+coverage/
+*.tsbuildinfo
+
+# misc
+.DS_Store
+*.log
